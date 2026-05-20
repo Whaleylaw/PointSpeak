@@ -11,6 +11,7 @@ dependencies = [
 
 [project.scripts]
 pointspeak-receiver = "pointspeak_receiver.main:main"
+pointspeak-receiver-smoke = "pointspeak_receiver.smoke:run"
 
 [build-system]
 requires = ["hatchling"]

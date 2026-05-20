@@ -17,4 +17,6 @@ session.pointspeak/
     latest.json
 ```
 
+Milestone 1 writes `manifest.json` last, after all other files, so its `hashes` object can include SHA-256 hashes for the bundle files that already exist. The screenshot hash is also written as `visualHash` in `timeline.ndjson`.
+
 Future additions may include transcripts, conversation state, retrieval logs, suggestions, video, keyframes, console/network logs, and an offline viewer.
