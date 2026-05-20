@@ -1,0 +1,17 @@
+{
+  "name": "@pointspeak/handoff",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@pointspeak/schema": "0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}

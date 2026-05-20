@@ -1,0 +1,25 @@
+{
+  "manifest_version": 3,
+  "name": "PointSpeak",
+  "version": "0.1.0",
+  "description": "Create agent-ready visual UI briefs.",
+  "permissions": ["activeTab", "scripting", "tabs", "storage", "sidePanel"],
+  "host_permissions": ["http://127.0.0.1:48321/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "Capture PointSpeak brief"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel/index.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}

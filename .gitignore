@@ -1,0 +1,20 @@
+# dependencies
+node_modules/
+.venv/
+__pycache__/
+*.pyc
+
+# builds
+dist/
+build/
+*.tsbuildinfo
+
+# env/local data
+.env
+.env.*
+!.env.example
+.pointspeak/
+.DS_Store
+
+# editor
+.vscode/settings.json

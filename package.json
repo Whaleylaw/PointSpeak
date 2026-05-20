@@ -1,0 +1,22 @@
+{
+  "name": "pointspeak",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Agent-ready visual briefings for coding agents",
+  "type": "module",
+  "scripts": {
+    "build": "npm run build -w @pointspeak/schema && npm run build -w @pointspeak/annotator && npm run build -w @pointspeak/capture-core && npm run build -w @pointspeak/handoff && npm run build -w @pointspeak/extension",
+    "typecheck": "npm run typecheck -w @pointspeak/schema && npm run typecheck -w @pointspeak/annotator && npm run typecheck -w @pointspeak/capture-core && npm run typecheck -w @pointspeak/handoff && npm run typecheck -w @pointspeak/extension",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "workspaces": [
+    "apps/extension",
+    "packages/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  }
+}
