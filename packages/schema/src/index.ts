@@ -66,6 +66,18 @@ export const AnnotationSchema = z.object({
   metadata: z.record(z.unknown()).default({}),
 });
 
+export const NarrationSchema = z.object({
+  narrationId: z.string(),
+  timestampMs: z.number().nonnegative(),
+  durationMs: z.number().nonnegative().optional(),
+  transcript: z.string().optional(),
+  audio: z.string().optional(),
+  mimeType: z.string().default("audio/webm"),
+  targetElementRefs: z.array(z.string()).default([]),
+  targetAnnotationRefs: z.array(z.string()).default([]),
+  metadata: z.record(z.unknown()).default({}),
+});
+
 export const TimelineEventSchema = z.object({
   eventId: z.string(),
   timestampMs: z.number().nonnegative(),
@@ -86,6 +98,7 @@ export const ManifestSchema = z.object({
   timeline: z.string().default("timeline.ndjson"),
   annotations: z.string().default("annotations.ndjson"),
   elements: z.string().default("elements.ndjson"),
+  narrations: z.string().default("narrations.ndjson"),
   media: z.array(z.string()).default([]),
   handoff: z.string().default("handoff/latest.md"),
 });
@@ -96,5 +109,6 @@ export type Selector = z.infer<typeof SelectorSchema>;
 export type PageMetadata = z.infer<typeof PageMetadataSchema>;
 export type ElementRef = z.infer<typeof ElementRefSchema>;
 export type Annotation = z.infer<typeof AnnotationSchema>;
+export type Narration = z.infer<typeof NarrationSchema>;
 export type TimelineEvent = z.infer<typeof TimelineEventSchema>;
 export type Manifest = z.infer<typeof ManifestSchema>;

@@ -3,7 +3,7 @@
   "name": "PointSpeak",
   "version": "0.1.0",
   "description": "Create agent-ready visual UI briefs.",
-  "permissions": ["activeTab", "scripting", "tabs", "storage", "sidePanel"],
+  "permissions": ["activeTab", "scripting", "tabs", "storage", "sidePanel", "audioCapture"],
   "host_permissions": ["http://127.0.0.1:48321/*"],
   "background": {
     "service_worker": "background.js",

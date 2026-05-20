@@ -32,20 +32,37 @@ type LastHandoff = {
   error?: string;
 };
 
+type LastNarration = {
+  sessionId: string;
+  narrationId: string;
+  audioPath?: string;
+  narrationsPath: string;
+  handoff: string;
+};
+
 function App() {
   const [session, setSession] = useState<LastSession | null>(null);
   const [element, setElement] = useState<LastElement | null>(null);
   const [annotation, setAnnotation] = useState<LastAnnotation | null>(null);
+  const [narration, setNarration] = useState<LastNarration | null>(null);
   const [handoff, setHandoff] = useState<LastHandoff | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     chrome.storage.local
-      .get(["lastPointSpeakSession", "lastPointSpeakElement", "lastPointSpeakAnnotation", "lastPointSpeakHandoff", "lastPointSpeakError"])
+      .get([
+        "lastPointSpeakSession",
+        "lastPointSpeakElement",
+        "lastPointSpeakAnnotation",
+        "lastPointSpeakNarration",
+        "lastPointSpeakHandoff",
+        "lastPointSpeakError",
+      ])
       .then((value) => {
         setSession((value.lastPointSpeakSession as LastSession | undefined) ?? null);
         setElement((value.lastPointSpeakElement as LastElement | undefined) ?? null);
         setAnnotation((value.lastPointSpeakAnnotation as LastAnnotation | undefined) ?? null);
+        setNarration((value.lastPointSpeakNarration as LastNarration | undefined) ?? null);
         setHandoff((value.lastPointSpeakHandoff as LastHandoff | undefined) ?? null);
         setError((value.lastPointSpeakError as string | undefined) ?? null);
       });
@@ -55,8 +72,8 @@ function App() {
     <main style={{ fontFamily: "system-ui", padding: 16, lineHeight: 1.4 }}>
       <h1>PointSpeak</h1>
       <p>
-        Click the extension button to capture the active tab, click an element, then drag a rectangle to annotate what the
-        agent should inspect.
+        Click the extension button to capture the active tab, click an element, drag an annotation rectangle, and optionally
+        record a short narration for the agent.
       </p>
       <p>
         Receiver: <code>http://127.0.0.1:48321</code>
@@ -108,6 +125,29 @@ function App() {
             <dt>Annotations File</dt>
             <dd>
               <code>{annotation.annotationsPath}</code>
+            </dd>
+          </dl>
+        </section>
+      ) : null}
+      {narration ? (
+        <section>
+          <h2>Last Narration</h2>
+          <dl>
+            <dt>Narration</dt>
+            <dd>
+              <code>{narration.narrationId}</code>
+            </dd>
+            {narration.audioPath ? (
+              <>
+                <dt>Audio</dt>
+                <dd>
+                  <code>{narration.audioPath}</code>
+                </dd>
+              </>
+            ) : null}
+            <dt>Narrations File</dt>
+            <dd>
+              <code>{narration.narrationsPath}</code>
             </dd>
           </dl>
         </section>

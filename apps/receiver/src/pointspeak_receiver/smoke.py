@@ -38,6 +38,7 @@ def run() -> None:
             "timeline.ndjson",
             "annotations.ndjson",
             "elements.ndjson",
+            "narrations.ndjson",
             "privacy-report.json",
             "media/screenshot.png",
             "handoff/latest.md",
@@ -114,6 +115,32 @@ def run() -> None:
         if "Look at this smoke-test rectangle" not in handoff or "e_smoke" not in handoff:
             raise AssertionError("Handoff did not include annotation linked to element")
 
+        narration_result = main.add_narration(
+            result.sessionId,
+            main.AddNarrationRequest(
+                narration=main.Narration(
+                    narrationId="n_smoke",
+                    timestampMs=0,
+                    durationMs=1500,
+                    transcript="This is the narrated smoke-test context.",
+                    audioDataUrl="data:audio/webm;base64," + base64.b64encode(b"smoke-audio").decode("ascii"),
+                    mimeType="audio/webm",
+                    targetElementRefs=["e_smoke"],
+                    targetAnnotationRefs=["a_smoke"],
+                )
+            ),
+        )
+        if narration_result.narrationId != "n_smoke":
+            raise AssertionError(f"Unexpected narration response: {narration_result}")
+        if not narration_result.audioPath or not Path(narration_result.audioPath).exists():
+            raise AssertionError("Narration audio file not written")
+        narrations_text = (bundle / "narrations.ndjson").read_text()
+        if "n_smoke" not in narrations_text or "audioDataUrl" in narrations_text:
+            raise AssertionError("Narration not appended cleanly")
+        handoff = (bundle / "handoff" / "latest.md").read_text()
+        if "This is the narrated smoke-test context" not in handoff:
+            raise AssertionError("Handoff did not include narration transcript")
+
         handoff_result = main.submit_handoff(
             result.sessionId,
             main.SubmitHandoffRequest(dryRun=True, hermesApiUrl="http://127.0.0.1:8642"),
@@ -131,6 +158,7 @@ def run() -> None:
         print(result.model_dump())
         print(element_result.model_dump())
         print(annotation_result.model_dump())
+        print(narration_result.model_dump())
         print(handoff_result.model_dump())
 
 

@@ -46,6 +46,14 @@ type SubmitHandoffResponse = {
   error?: string;
 };
 
+type AddNarrationResponse = {
+  sessionId: string;
+  narrationId: string;
+  audioPath?: string;
+  narrationsPath: string;
+  handoff: string;
+};
+
 async function setBadge(text: string, color: string): Promise<void> {
   await chrome.action.setBadgeText({ text });
   await chrome.action.setBadgeBackgroundColor({ color });
@@ -87,6 +95,10 @@ async function startAnnotation(tabId: number, sessionId: string, elementRef: str
   await chrome.tabs.sendMessage(tabId, { type: "POINTSPEAK_START_ANNOTATION", sessionId, elementRef });
 }
 
+async function startNarration(tabId: number, sessionId: string, elementRef?: string, annotationId?: string): Promise<void> {
+  await chrome.tabs.sendMessage(tabId, { type: "POINTSPEAK_START_NARRATION", sessionId, elementRef, annotationId });
+}
+
 async function postPickedElement(sessionId: string, element: unknown): Promise<AddElementResponse> {
   const response = await fetch(`${RECEIVER_URL}/sessions/${sessionId}/elements`, {
     method: "POST",
@@ -111,6 +123,19 @@ async function postAnnotation(sessionId: string, annotation: unknown): Promise<A
     throw new Error(`PointSpeak receiver rejected annotation: ${await response.text()}`);
   }
   return response.json() as Promise<AddAnnotationResponse>;
+}
+
+async function postNarration(sessionId: string, narration: unknown): Promise<AddNarrationResponse> {
+  const response = await fetch(`${RECEIVER_URL}/sessions/${sessionId}/narrations`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ narration }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`PointSpeak receiver rejected narration: ${await response.text()}`);
+  }
+  return response.json() as Promise<AddNarrationResponse>;
 }
 
 async function submitHandoff(sessionId: string): Promise<SubmitHandoffResponse> {
@@ -198,12 +223,57 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     postAnnotation(message.sessionId, message.annotation)
       .then(async (result) => {
         await chrome.storage.local.set({ lastPointSpeakAnnotation: result, lastPointSpeakError: null });
+        if (sender.tab?.id) {
+          await setBadge("REC", "#ef4444");
+          const elementRef = Array.isArray(message.annotation?.targetElementRefs) ? message.annotation.targetElementRefs[0] : undefined;
+          await startNarration(sender.tab.id, message.sessionId, elementRef, result.annotationId);
+          sendResponse({ ok: true, result });
+          return;
+        }
         await setBadge("SEND", "#2563eb");
         const handoff = await submitHandoff(message.sessionId);
         await chrome.storage.local.set({ lastPointSpeakHandoff: handoff, lastPointSpeakError: handoff.error ?? null });
         await setBadge(handoff.status === "submitted" ? "SENT" : "SAVE", handoff.status === "submitted" ? "#16a34a" : "#f97316");
         await clearBadgeSoon();
         sendResponse({ ok: true, result, handoff });
+      })
+      .catch(async (error) => {
+        await setBadge("ERR", "#dc2626");
+        await clearBadgeSoon();
+        await chrome.storage.local.set({ lastPointSpeakError: error instanceof Error ? error.message : String(error) });
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+    return true;
+  }
+
+
+  if (message?.type === "POINTSPEAK_NARRATION_CAPTURED" && typeof message.sessionId === "string") {
+    postNarration(message.sessionId, message.narration)
+      .then(async (result) => {
+        await chrome.storage.local.set({ lastPointSpeakNarration: result, lastPointSpeakError: null });
+        await setBadge("SEND", "#2563eb");
+        const handoff = await submitHandoff(message.sessionId);
+        await chrome.storage.local.set({ lastPointSpeakHandoff: handoff, lastPointSpeakError: handoff.error ?? null });
+        await setBadge(handoff.status === "submitted" ? "SENT" : "SAVE", handoff.status === "submitted" ? "#16a34a" : "#f97316");
+        await clearBadgeSoon();
+        sendResponse({ ok: true, result, handoff });
+      })
+      .catch(async (error) => {
+        await setBadge("ERR", "#dc2626");
+        await clearBadgeSoon();
+        await chrome.storage.local.set({ lastPointSpeakError: error instanceof Error ? error.message : String(error) });
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+    return true;
+  }
+
+  if (message?.type === "POINTSPEAK_NARRATION_SKIPPED" && typeof message.sessionId === "string") {
+    submitHandoff(message.sessionId)
+      .then(async (handoff) => {
+        await chrome.storage.local.set({ lastPointSpeakHandoff: handoff, lastPointSpeakError: handoff.error ?? null });
+        await setBadge(handoff.status === "submitted" ? "SENT" : "SAVE", handoff.status === "submitted" ? "#16a34a" : "#f97316");
+        await clearBadgeSoon();
+        sendResponse({ ok: true, handoff });
       })
       .catch(async (error) => {
         await setBadge("ERR", "#dc2626");

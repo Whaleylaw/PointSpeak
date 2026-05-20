@@ -6,10 +6,10 @@ PointSpeak captures screenshots, annotations, DOM/element metadata, and later na
 
 ## Current Status
 
-Milestone 4 Hermes handoff is implemented:
+Milestone 5 narrated voice notes are implemented:
 
-- `apps/extension` — Chrome MV3 extension that captures the active visible tab, starts element-pick mode, captures an annotation, and submits a Hermes handoff.
-- `apps/receiver` — local FastAPI receiver that writes `.pointspeak` bundles and can submit them to Hermes API Server.
+- `apps/extension` — Chrome MV3 extension that captures the active visible tab, starts element-pick mode, captures an annotation, optionally records a short narration, and submits a Hermes handoff.
+- `apps/receiver` — local FastAPI receiver that writes `.pointspeak` bundles, stores narration audio/transcripts, and can submit them to Hermes API Server.
 - `packages/schema` — shared TypeScript schema definitions.
 - `packages/annotator` — annotation helper types.
 - `packages/capture-core` — placeholder capture/event helpers.
@@ -35,7 +35,7 @@ pip install -e .
 pointspeak-receiver
 ```
 
-Then load `apps/extension/dist` as an unpacked Chrome extension. Clicking the PointSpeak toolbar button captures the active tab screenshot and page metadata, prompts you to click a page element, then lets you drag an annotation rectangle and enter a short note. The bundle is written into:
+Then load `apps/extension/dist` as an unpacked Chrome extension. Clicking the PointSpeak toolbar button captures the active tab screenshot and page metadata, prompts you to click a page element, lets you drag an annotation rectangle and enter a short note, then offers an optional short voice narration. The bundle is written into:
 
 ```text
 ~/.pointspeak/sessions/<session>/session.pointspeak/
@@ -51,7 +51,7 @@ pointspeak-receiver-smoke
 
 ## Hermes handoff
 
-After an annotation is saved, the extension asks the receiver to submit the bundle to Hermes API Server:
+After annotation and optional narration are saved, the extension asks the receiver to submit the bundle to Hermes API Server:
 
 ```text
 POST http://127.0.0.1:48321/sessions/<session_id>/handoff

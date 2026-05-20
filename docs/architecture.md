@@ -41,6 +41,16 @@ Hermes/Coder handoff is now wired through the local receiver:
 - Each handoff attempt is written to `handoff/hermes-request.json` and included in manifest hashes.
 - If Hermes API Server is unavailable, the bundle remains valid locally and the failed handoff attempt is recorded for retry.
 
+## Milestone 5 Implementation
+
+Narrated voice notes are now part of the local bundle:
+
+- After annotation capture, the extension offers a microphone recording step.
+- The user can record up to 15 seconds or skip narration.
+- Captured narration is posted to `POST /sessions/{session_id}/narrations`.
+- The receiver writes audio to `media/<narrationId>.webm`, appends metadata to `narrations.ndjson`, appends a `narration.captured` timeline event, and refreshes handoff files.
+- Optional transcript/summary text is included in the handoff so agents can use narration even before automatic STT is added.
+
 ## Design Principles
 
 - Screenshot is the visual source of truth.

@@ -48,6 +48,8 @@ let annotationOverlay: HTMLDivElement | null = null;
 let annotationBox: HTMLDivElement | null = null;
 let annotationStart: { x: number; y: number } | null = null;
 let annotationLatest: { x: number; y: number } | null = null;
+let narrationOverlay: HTMLDivElement | null = null;
+let activeAnnotationRef: string | null = null;
 
 function cssPath(element: Element): string {
   const parts: string[] = [];
@@ -422,6 +424,140 @@ function startAnnotationMode(sessionId: string, elementRef: string): void {
   document.addEventListener("keydown", handleAnnotationKeydown, true);
 }
 
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+function removeNarrationMode(): void {
+  narrationOverlay?.remove();
+  narrationOverlay = null;
+  activeSessionId = null;
+  activeElementRef = null;
+  activeAnnotationRef = null;
+}
+
+function createNarrationButton(label: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.textContent = label;
+  Object.assign(button.style, {
+    border: "0",
+    borderRadius: "8px",
+    padding: "8px 12px",
+    font: "13px system-ui, sans-serif",
+    cursor: "pointer",
+  });
+  return button;
+}
+
+function startNarrationMode(sessionId: string, elementRef?: string, annotationRef?: string): void {
+  removePickMode();
+  removeAnnotationMode();
+  removeNarrationMode();
+  activeSessionId = sessionId;
+  activeElementRef = elementRef || null;
+  activeAnnotationRef = annotationRef || null;
+
+  narrationOverlay = document.createElement("div");
+  Object.assign(narrationOverlay.style, {
+    position: "fixed",
+    top: "12px",
+    right: "12px",
+    zIndex: "2147483647",
+    width: "320px",
+    background: "#111827",
+    color: "white",
+    padding: "12px",
+    borderRadius: "12px",
+    font: "13px system-ui, sans-serif",
+    boxShadow: "0 8px 28px rgba(0,0,0,.35)",
+  });
+
+  const title = document.createElement("div");
+  title.textContent = "PointSpeak narration";
+  title.style.fontWeight = "700";
+  const help = document.createElement("p");
+  help.textContent = "Optionally record a short voice note for the agent. You can skip this step.";
+  help.style.margin = "8px 0";
+
+  const controls = document.createElement("div");
+  Object.assign(controls.style, { display: "flex", gap: "8px" });
+  const recordButton = createNarrationButton("Record");
+  recordButton.style.background = "#ef4444";
+  recordButton.style.color = "white";
+  const skipButton = createNarrationButton("Skip");
+  skipButton.style.background = "#374151";
+  skipButton.style.color = "white";
+  const status = document.createElement("div");
+  status.textContent = "Ready";
+  status.style.marginTop = "8px";
+
+  controls.append(recordButton, skipButton);
+  narrationOverlay.append(title, help, controls, status);
+  document.documentElement.append(narrationOverlay);
+
+  skipButton.addEventListener("click", () => {
+    const currentSessionId = activeSessionId;
+    removeNarrationMode();
+    chrome.runtime.sendMessage({ type: "POINTSPEAK_NARRATION_SKIPPED", sessionId: currentSessionId });
+  });
+
+  recordButton.addEventListener("click", async () => {
+    if (!activeSessionId) return;
+    try {
+      recordButton.disabled = true;
+      status.textContent = "Requesting microphone…";
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const chunks: Blob[] = [];
+      const recorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : undefined });
+      const startedAt = Date.now();
+      recorder.addEventListener("dataavailable", (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      });
+      recorder.addEventListener("stop", async () => {
+        stream.getTracks().forEach((track) => track.stop());
+        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
+        const audioDataUrl = await blobToDataUrl(blob);
+        const transcript = window.prompt("Optional transcript/summary for this voice note?", "") || undefined;
+        const currentSessionId = activeSessionId;
+        const narration = {
+          narrationId: `n_${Date.now().toString(36)}`,
+          timestampMs: 0,
+          durationMs: Date.now() - startedAt,
+          transcript: transcript?.trim() || undefined,
+          audioDataUrl,
+          mimeType: blob.type || "audio/webm",
+          targetElementRefs: activeElementRef ? [activeElementRef] : [],
+          targetAnnotationRefs: activeAnnotationRef ? [activeAnnotationRef] : [],
+          metadata: {
+            url: location.href,
+            source: "chrome-extension-mediarecorder",
+          },
+        };
+        removeNarrationMode();
+        chrome.runtime.sendMessage({ type: "POINTSPEAK_NARRATION_CAPTURED", sessionId: currentSessionId, narration });
+      });
+      recorder.start();
+      status.textContent = "Recording… click Stop or wait 15 seconds.";
+      recordButton.textContent = "Stop";
+      recordButton.disabled = false;
+      recordButton.onclick = () => {
+        if (recorder.state === "recording") recorder.stop();
+      };
+      window.setTimeout(() => {
+        if (recorder.state === "recording") recorder.stop();
+      }, 15000);
+    } catch (error) {
+      status.textContent = `Mic unavailable: ${error instanceof Error ? error.message : String(error)}`;
+      recordButton.disabled = false;
+    }
+  });
+}
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === "POINTSPEAK_GET_ELEMENT_AT" && typeof message.x === "number" && typeof message.y === "number") {
     const el = document.elementFromPoint(message.x, message.y);
@@ -445,6 +581,12 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     typeof message.elementRef === "string"
   ) {
     startAnnotationMode(message.sessionId, message.elementRef);
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (message?.type === "POINTSPEAK_START_NARRATION" && typeof message.sessionId === "string") {
+    startNarrationMode(message.sessionId, message.elementRef, message.annotationId);
     sendResponse({ ok: true });
     return true;
   }

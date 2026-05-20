@@ -100,6 +100,18 @@ class Annotation(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class Narration(BaseModel):
+    narrationId: str
+    timestampMs: float = 0
+    durationMs: float | None = None
+    transcript: str | None = None
+    audioDataUrl: str | None = None
+    mimeType: str = "audio/webm"
+    targetElementRefs: list[str] = Field(default_factory=list)
+    targetAnnotationRefs: list[str] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class CreateSessionRequest(BaseModel):
     mode: Literal["snapshot", "walkthrough", "live"] = "snapshot"
     source: str = "chrome-extension"
@@ -133,6 +145,18 @@ class AddAnnotationResponse(BaseModel):
     sessionId: str
     annotationId: str
     annotationsPath: str
+    handoff: str
+
+
+class AddNarrationRequest(BaseModel):
+    narration: Narration
+
+
+class AddNarrationResponse(BaseModel):
+    sessionId: str
+    narrationId: str
+    audioPath: str | None = None
+    narrationsPath: str
     handoff: str
 
 
@@ -236,10 +260,22 @@ def annotation_label(annotation: dict[str, Any]) -> str:
     return ": ".join([parts[0], " ".join(parts[1:])]) if len(parts) > 1 else parts[0]
 
 
+def narration_label(narration: dict[str, Any]) -> str:
+    parts = [narration.get("narrationId", "narration")]
+    duration = narration.get("durationMs")
+    transcript = narration.get("transcript")
+    if duration is not None:
+        parts.append(f"{round(float(duration) / 1000, 1)}s")
+    if transcript:
+        parts.append(json.dumps(str(transcript)[:160]))
+    return ": ".join([parts[0], " ".join(parts[1:])]) if len(parts) > 1 else parts[0]
+
+
 def render_handoff(session_id: str, root: Path, media: list[str]) -> str:
     page = load_page(root)
     elements = read_ndjson(root / "elements.ndjson")
     annotations = read_ndjson(root / "annotations.ndjson")
+    narrations = read_ndjson(root / "narrations.ndjson")
     screenshot_line = f"- Screenshot: {root / media[0]}" if media else "- Screenshot: _not captured_"
     title = page.get("title") or session_id
     viewport = page.get("viewport") or {}
@@ -272,6 +308,16 @@ def render_handoff(session_id: str, root: Path, media: list[str]) -> str:
         annotation_lines.append(f"- {annotation_label(annotation)}\n  - target elements: {target_text}\n  - shape: {shape_text}".rstrip())
     annotation_block = "\n".join(annotation_lines) if annotation_lines else "_None captured yet. Use annotation overlay after selecting an element._"
 
+    narration_lines: list[str] = []
+    for narration in narrations:
+        audio = narration.get("audio") or "not captured"
+        elements_target = ", ".join(narration.get("targetElementRefs") or []) or "none"
+        annotations_target = ", ".join(narration.get("targetAnnotationRefs") or []) or "none"
+        narration_lines.append(
+            f"- {narration_label(narration)}\n  - audio: {root / audio if audio != 'not captured' else audio}\n  - target elements: {elements_target}\n  - target annotations: {annotations_target}".rstrip()
+        )
+    narration_block = "\n".join(narration_lines) if narration_lines else "_None captured yet. Narration starts in Milestone 5._"
+
     return f"""# PointSpeak Brief: {title}
 
 ## User Request
@@ -290,6 +336,9 @@ _No standalone user request captured yet. Milestone 3 captures visual annotation
 ## Annotations
 {annotation_block}
 
+## Narration
+{narration_block}
+
 ## Artifacts
 - Session ID: {session_id}
 - Bundle: {root}
@@ -301,6 +350,7 @@ _No standalone user request captured yet. Milestone 3 captures visual annotation
 def init_empty_bundle_files(root: Path) -> None:
     (root / "annotations.ndjson").write_text("", encoding="utf-8")
     (root / "elements.ndjson").write_text("", encoding="utf-8")
+    (root / "narrations.ndjson").write_text("", encoding="utf-8")
 
 
 def build_file_hashes(root: Path) -> dict[str, str]:
@@ -324,6 +374,7 @@ def write_manifest(root: Path, session_id: str, mode: str, source: str, media: l
         "timeline": "timeline.ndjson",
         "annotations": "annotations.ndjson",
         "elements": "elements.ndjson",
+        "narrations": "narrations.ndjson",
         "privacyReport": "privacy-report.json",
         "media": media,
         "handoff": "handoff/latest.md",
@@ -352,6 +403,7 @@ def refresh_handoff_and_manifest(root: Path, session_id: str) -> None:
             "media": media,
             "elements": read_ndjson(root / "elements.ndjson"),
             "annotations": read_ndjson(root / "annotations.ndjson"),
+            "narrations": read_ndjson(root / "narrations.ndjson"),
         },
     )
     write_manifest(
@@ -566,6 +618,7 @@ def get_session(session_id: str) -> dict[str, object]:
         "manifest": load_manifest(root),
         "elements": read_ndjson(root / "elements.ndjson"),
         "annotations": read_ndjson(root / "annotations.ndjson"),
+        "narrations": read_ndjson(root / "narrations.ndjson"),
     }
 
 
@@ -615,6 +668,70 @@ def add_annotation(session_id: str, req: AddAnnotationRequest) -> AddAnnotationR
         sessionId=session_id,
         annotationId=req.annotation.annotationId,
         annotationsPath=str(root / "annotations.ndjson"),
+        handoff=str(root / "handoff" / "latest.md"),
+    )
+
+
+@app.post("/sessions/{session_id}/narrations", response_model=AddNarrationResponse)
+def add_narration(session_id: str, req: AddNarrationRequest) -> AddNarrationResponse:
+    root = require_session_root(session_id)
+    narration_data = req.narration.model_dump(mode="json", exclude_none=True)
+    audio_path: Path | None = None
+    if req.narration.audioDataUrl:
+        audio_bytes = decode_data_url(req.narration.audioDataUrl)
+        extension = "webm"
+        if "ogg" in req.narration.mimeType:
+            extension = "ogg"
+        elif "mpeg" in req.narration.mimeType or "mp3" in req.narration.mimeType:
+            extension = "mp3"
+        audio_path = root / "media" / f"{req.narration.narrationId}.{extension}"
+        audio_path.parent.mkdir(parents=True, exist_ok=True)
+        audio_path.write_bytes(audio_bytes)
+        narration_data.pop("audioDataUrl", None)
+        audio_rel = str(audio_path.relative_to(root))
+        narration_data["audio"] = audio_rel
+        narration_data["audioSha256"] = file_sha256(audio_path)
+        narration_data["audioBytes"] = len(audio_bytes)
+        manifest = load_manifest(root)
+        media = list(manifest.get("media") or [])
+        if audio_rel not in media:
+            write_manifest(
+                root,
+                session_id=session_id,
+                mode=str(manifest.get("mode", "snapshot")),
+                source=str(manifest.get("source", "unknown")),
+                media=[*media, audio_rel],
+                created_at=str(manifest.get("createdAt") or utc_now()),
+            )
+        privacy_path = root / "privacy-report.json"
+        if privacy_path.exists():
+            privacy = json.loads(privacy_path.read_text(encoding="utf-8"))
+            defaults = privacy.setdefault("defaults", {})
+            defaults["audioCaptured"] = True
+            write_json(privacy_path, privacy)
+
+    append_ndjson(root / "narrations.ndjson", narration_data)
+    append_ndjson(
+        root / "timeline.ndjson",
+        {
+            "eventId": f"t_{uuid.uuid4().hex}",
+            "timestampMs": req.narration.timestampMs,
+            "type": "narration.captured",
+            "media": narration_data.get("audio"),
+            "data": {
+                "narrationId": req.narration.narrationId,
+                "targetElementRefs": req.narration.targetElementRefs,
+                "targetAnnotationRefs": req.narration.targetAnnotationRefs,
+                "durationMs": req.narration.durationMs,
+            },
+        },
+    )
+    refresh_handoff_and_manifest(root, session_id)
+    return AddNarrationResponse(
+        sessionId=session_id,
+        narrationId=req.narration.narrationId,
+        audioPath=str(audio_path) if audio_path else None,
+        narrationsPath=str(root / "narrations.ndjson"),
         handoff=str(root / "handoff" / "latest.md"),
     )
 
