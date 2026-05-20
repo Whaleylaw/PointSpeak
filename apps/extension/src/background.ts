@@ -36,6 +36,16 @@ type AddAnnotationResponse = {
   handoff: string;
 };
 
+type SubmitHandoffResponse = {
+  sessionId: string;
+  status: "dry_run" | "submitted" | "failed";
+  runId?: string;
+  hermesApiUrl: string;
+  requestPath: string;
+  handoff: string;
+  error?: string;
+};
+
 async function setBadge(text: string, color: string): Promise<void> {
   await chrome.action.setBadgeText({ text });
   await chrome.action.setBadgeBackgroundColor({ color });
@@ -101,6 +111,19 @@ async function postAnnotation(sessionId: string, annotation: unknown): Promise<A
     throw new Error(`PointSpeak receiver rejected annotation: ${await response.text()}`);
   }
   return response.json() as Promise<AddAnnotationResponse>;
+}
+
+async function submitHandoff(sessionId: string): Promise<SubmitHandoffResponse> {
+  const response = await fetch(`${RECEIVER_URL}/sessions/${sessionId}/handoff`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({}),
+  });
+
+  if (!response.ok) {
+    throw new Error(`PointSpeak receiver rejected handoff: ${await response.text()}`);
+  }
+  return response.json() as Promise<SubmitHandoffResponse>;
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -175,9 +198,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     postAnnotation(message.sessionId, message.annotation)
       .then(async (result) => {
         await chrome.storage.local.set({ lastPointSpeakAnnotation: result, lastPointSpeakError: null });
-        await setBadge("OK", "#16a34a");
+        await setBadge("SEND", "#2563eb");
+        const handoff = await submitHandoff(message.sessionId);
+        await chrome.storage.local.set({ lastPointSpeakHandoff: handoff, lastPointSpeakError: handoff.error ?? null });
+        await setBadge(handoff.status === "submitted" ? "SENT" : "SAVE", handoff.status === "submitted" ? "#16a34a" : "#f97316");
         await clearBadgeSoon();
-        sendResponse({ ok: true, result });
+        sendResponse({ ok: true, result, handoff });
       })
       .catch(async (error) => {
         await setBadge("ERR", "#dc2626");

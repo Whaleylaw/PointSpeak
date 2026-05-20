@@ -114,10 +114,24 @@ def run() -> None:
         if "Look at this smoke-test rectangle" not in handoff or "e_smoke" not in handoff:
             raise AssertionError("Handoff did not include annotation linked to element")
 
+        handoff_result = main.submit_handoff(
+            result.sessionId,
+            main.SubmitHandoffRequest(dryRun=True, hermesApiUrl="http://127.0.0.1:8642"),
+        )
+        if handoff_result.status != "dry_run":
+            raise AssertionError(f"Unexpected handoff response: {handoff_result}")
+        request_path = Path(handoff_result.requestPath)
+        if not request_path.exists():
+            raise AssertionError("Hermes handoff request file not written")
+        request_json = json.loads(request_path.read_text())
+        if result.sessionId not in request_json["body"]["input"] or "PointSpeak visual briefing captured" not in request_json["body"]["input"]:
+            raise AssertionError("Hermes handoff prompt missing PointSpeak context")
+
         print("receiver smoke ok")
         print(result.model_dump())
         print(element_result.model_dump())
         print(annotation_result.model_dump())
+        print(handoff_result.model_dump())
 
 
 if __name__ == "__main__":

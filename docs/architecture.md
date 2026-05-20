@@ -31,6 +31,16 @@ The current implementation also supports element selection:
 - The background service worker posts that element to `POST /sessions/{session_id}/elements`.
 - Receiver appends the element to `elements.ndjson`, appends an `element.selected` timeline event, refreshes handoff files, and rewrites manifest hashes.
 
+## Milestone 4 Implementation
+
+Hermes/Coder handoff is now wired through the local receiver:
+
+- After annotation capture, the extension calls `POST /sessions/{session_id}/handoff`.
+- The receiver renders a self-contained handoff prompt with bundle path, handoff markdown path, screenshot path, referenced elements, and annotations.
+- The receiver submits a non-blocking run to Hermes API Server at `/v1/runs`.
+- Each handoff attempt is written to `handoff/hermes-request.json` and included in manifest hashes.
+- If Hermes API Server is unavailable, the bundle remains valid locally and the failed handoff attempt is recorded for retry.
+
 ## Design Principles
 
 - Screenshot is the visual source of truth.

@@ -5,6 +5,8 @@ import binascii
 import hashlib
 import json
 import os
+import urllib.error
+import urllib.request
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +19,9 @@ from pydantic import BaseModel, Field
 
 DEFAULT_STORAGE_ROOT = Path(os.environ.get("POINTSPEAK_HOME", Path.home() / ".pointspeak" / "sessions"))
 SCHEMA_VERSION = "0.1.0"
+DEFAULT_HERMES_API_URL = os.environ.get("POINTSPEAK_HERMES_API_URL", "http://127.0.0.1:8642")
+DEFAULT_HERMES_MODEL = os.environ.get("POINTSPEAK_HERMES_MODEL", "hermes-agent")
+DEFAULT_HERMES_TIMEOUT_SECONDS = float(os.environ.get("POINTSPEAK_HERMES_TIMEOUT_SECONDS", "3"))
 
 app = FastAPI(title="PointSpeak Receiver", version="0.1.0")
 app.add_middleware(
@@ -129,6 +134,23 @@ class AddAnnotationResponse(BaseModel):
     annotationId: str
     annotationsPath: str
     handoff: str
+
+
+class SubmitHandoffRequest(BaseModel):
+    dryRun: bool = False
+    hermesApiUrl: str | None = None
+    model: str | None = None
+    instructions: str | None = None
+
+
+class SubmitHandoffResponse(BaseModel):
+    sessionId: str
+    status: Literal["dry_run", "submitted", "failed"]
+    runId: str | None = None
+    hermesApiUrl: str
+    requestPath: str
+    handoff: str
+    error: str | None = None
 
 
 def utc_now() -> str:
@@ -342,6 +364,135 @@ def refresh_handoff_and_manifest(root: Path, session_id: str) -> None:
     )
 
 
+def render_hermes_handoff_prompt(session_id: str, root: Path) -> str:
+    handoff_path = root / "handoff" / "latest.md"
+    handoff_text = handoff_path.read_text(encoding="utf-8") if handoff_path.exists() else ""
+    manifest = load_manifest(root)
+    media = list(manifest.get("media") or [])
+    screenshot = root / media[0] if media else None
+    return f"""PointSpeak visual briefing captured.
+
+Use this as precise, local-first context for the current coding/UI task. Inspect the handoff markdown and, if useful, the screenshot artifact. The selected elements and annotations identify exactly what the user pointed at.
+
+Session ID: {session_id}
+Bundle path: {root}
+Handoff markdown: {handoff_path}
+Screenshot: {screenshot if screenshot else 'not captured'}
+
+Handoff content:
+
+{handoff_text}
+"""
+
+
+def submit_handoff_to_hermes(
+    session_id: str,
+    root: Path,
+    req: SubmitHandoffRequest,
+) -> SubmitHandoffResponse:
+    hermes_api_url = (req.hermesApiUrl or DEFAULT_HERMES_API_URL).rstrip("/")
+    model = req.model or DEFAULT_HERMES_MODEL
+    handoff_path = root / "handoff" / "latest.md"
+    request_path = root / "handoff" / "hermes-request.json"
+    instructions = req.instructions or (
+        "You are Coder receiving a PointSpeak visual briefing. Acknowledge the bundle, summarize the referenced UI "
+        "element(s) and annotation(s), and propose the next concrete coding/debugging step. Do not modify files unless "
+        "the user explicitly asks in a follow-up."
+    )
+    body = {
+        "model": model,
+        "session_id": f"pointspeak-{session_id}",
+        "instructions": instructions,
+        "input": render_hermes_handoff_prompt(session_id, root),
+    }
+    headers = {"Content-Type": "application/json", "X-Hermes-Session-Key": "pointspeak"}
+    api_key = os.environ.get("POINTSPEAK_HERMES_API_KEY") or os.environ.get("API_SERVER_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    if req.dryRun:
+        write_json(
+            request_path,
+            {
+                "createdAt": utc_now(),
+                "status": "dry_run",
+                "hermesApiUrl": hermes_api_url,
+                "endpoint": "/v1/runs",
+                "headers": {key: ("<redacted>" if key.lower() == "authorization" else value) for key, value in headers.items()},
+                "body": body,
+            },
+        )
+        refresh_handoff_and_manifest(root, session_id)
+        return SubmitHandoffResponse(
+            sessionId=session_id,
+            status="dry_run",
+            hermesApiUrl=hermes_api_url,
+            requestPath=str(request_path),
+            handoff=str(handoff_path),
+        )
+
+    try:
+        http_req = urllib.request.Request(
+            f"{hermes_api_url}/v1/runs",
+            data=json.dumps(body).encode("utf-8"),
+            headers=headers,
+            method="POST",
+        )
+        with urllib.request.urlopen(http_req, timeout=DEFAULT_HERMES_TIMEOUT_SECONDS) as response:
+            response_body = json.loads(response.read().decode("utf-8") or "{}")
+        run_id = response_body.get("run_id")
+        write_json(
+            request_path,
+            {
+                "createdAt": utc_now(),
+                "status": "submitted",
+                "hermesApiUrl": hermes_api_url,
+                "endpoint": "/v1/runs",
+                "runId": run_id,
+                "response": response_body,
+            },
+        )
+        append_ndjson(
+            root / "timeline.ndjson",
+            {
+                "eventId": f"t_{uuid.uuid4().hex}",
+                "timestampMs": 0,
+                "type": "handoff.submitted",
+                "data": {"target": "hermes", "runId": run_id, "hermesApiUrl": hermes_api_url},
+            },
+        )
+        refresh_handoff_and_manifest(root, session_id)
+        return SubmitHandoffResponse(
+            sessionId=session_id,
+            status="submitted",
+            runId=run_id,
+            hermesApiUrl=hermes_api_url,
+            requestPath=str(request_path),
+            handoff=str(handoff_path),
+        )
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+        write_json(
+            request_path,
+            {
+                "createdAt": utc_now(),
+                "status": "failed",
+                "hermesApiUrl": hermes_api_url,
+                "endpoint": "/v1/runs",
+                "error": str(exc),
+                "body": body,
+            },
+        )
+        refresh_handoff_and_manifest(root, session_id)
+        return SubmitHandoffResponse(
+            sessionId=session_id,
+            status="failed",
+            hermesApiUrl=hermes_api_url,
+            requestPath=str(request_path),
+            handoff=str(handoff_path),
+            error=str(exc),
+        )
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "service": "pointspeak-receiver", "schemaVersion": SCHEMA_VERSION}
@@ -466,6 +617,13 @@ def add_annotation(session_id: str, req: AddAnnotationRequest) -> AddAnnotationR
         annotationsPath=str(root / "annotations.ndjson"),
         handoff=str(root / "handoff" / "latest.md"),
     )
+
+
+@app.post("/sessions/{session_id}/handoff", response_model=SubmitHandoffResponse)
+def submit_handoff(session_id: str, req: SubmitHandoffRequest | None = None) -> SubmitHandoffResponse:
+    root = require_session_root(session_id)
+    refresh_handoff_and_manifest(root, session_id)
+    return submit_handoff_to_hermes(session_id, root, req or SubmitHandoffRequest())
 
 
 @app.get("/sessions/{session_id}/handoff.md", response_class=PlainTextResponse)

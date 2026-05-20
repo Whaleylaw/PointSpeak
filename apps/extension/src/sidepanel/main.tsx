@@ -22,19 +22,31 @@ type LastAnnotation = {
   handoff: string;
 };
 
+type LastHandoff = {
+  sessionId: string;
+  status: "dry_run" | "submitted" | "failed";
+  runId?: string;
+  hermesApiUrl: string;
+  requestPath: string;
+  handoff: string;
+  error?: string;
+};
+
 function App() {
   const [session, setSession] = useState<LastSession | null>(null);
   const [element, setElement] = useState<LastElement | null>(null);
   const [annotation, setAnnotation] = useState<LastAnnotation | null>(null);
+  const [handoff, setHandoff] = useState<LastHandoff | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     chrome.storage.local
-      .get(["lastPointSpeakSession", "lastPointSpeakElement", "lastPointSpeakAnnotation", "lastPointSpeakError"])
+      .get(["lastPointSpeakSession", "lastPointSpeakElement", "lastPointSpeakAnnotation", "lastPointSpeakHandoff", "lastPointSpeakError"])
       .then((value) => {
         setSession((value.lastPointSpeakSession as LastSession | undefined) ?? null);
         setElement((value.lastPointSpeakElement as LastElement | undefined) ?? null);
         setAnnotation((value.lastPointSpeakAnnotation as LastAnnotation | undefined) ?? null);
+        setHandoff((value.lastPointSpeakHandoff as LastHandoff | undefined) ?? null);
         setError((value.lastPointSpeakError as string | undefined) ?? null);
       });
   }, []);
@@ -96,6 +108,33 @@ function App() {
             <dt>Annotations File</dt>
             <dd>
               <code>{annotation.annotationsPath}</code>
+            </dd>
+          </dl>
+        </section>
+      ) : null}
+      {handoff ? (
+        <section>
+          <h2>Hermes Handoff</h2>
+          <dl>
+            <dt>Status</dt>
+            <dd>
+              <code>{handoff.status}</code>
+            </dd>
+            <dt>Hermes API</dt>
+            <dd>
+              <code>{handoff.hermesApiUrl}</code>
+            </dd>
+            {handoff.runId ? (
+              <>
+                <dt>Run</dt>
+                <dd>
+                  <code>{handoff.runId}</code>
+                </dd>
+              </>
+            ) : null}
+            <dt>Request</dt>
+            <dd>
+              <code>{handoff.requestPath}</code>
             </dd>
           </dl>
         </section>
