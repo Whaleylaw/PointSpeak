@@ -83,9 +83,41 @@ def run() -> None:
         if "Smoke Button" not in handoff:
             raise AssertionError("Handoff did not include selected element")
 
+        annotation_result = main.add_annotation(
+            result.sessionId,
+            main.AddAnnotationRequest(
+                annotation=main.Annotation(
+                    annotationId="a_smoke",
+                    type="rectangle",
+                    timestampMs=0,
+                    text="Look at this smoke-test rectangle",
+                    targetElementRefs=["e_smoke"],
+                    color="#f97316",
+                    shape=main.AnnotationShape(
+                        x=12,
+                        y=24,
+                        width=80,
+                        height=32,
+                        pageX=12,
+                        pageY=144,
+                        coordinateSpace="viewport",
+                    ),
+                )
+            ),
+        )
+        if annotation_result.annotationId != "a_smoke":
+            raise AssertionError(f"Unexpected annotation response: {annotation_result}")
+        annotations_text = (bundle / "annotations.ndjson").read_text()
+        if "a_smoke" not in annotations_text:
+            raise AssertionError("Annotation not appended")
+        handoff = (bundle / "handoff" / "latest.md").read_text()
+        if "Look at this smoke-test rectangle" not in handoff or "e_smoke" not in handoff:
+            raise AssertionError("Handoff did not include annotation linked to element")
+
         print("receiver smoke ok")
         print(result.model_dump())
         print(element_result.model_dump())
+        print(annotation_result.model_dump())
 
 
 if __name__ == "__main__":

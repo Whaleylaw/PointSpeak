@@ -51,7 +51,19 @@ export const AnnotationSchema = z.object({
   timestampMs: z.number().nonnegative(),
   text: z.string().optional(),
   targetElementRefs: z.array(z.string()).default([]),
-  shape: z.record(z.unknown()).optional(),
+  color: z.string().optional(),
+  shape: z
+    .object({
+      x: z.number(),
+      y: z.number(),
+      width: z.number(),
+      height: z.number(),
+      pageX: z.number().optional(),
+      pageY: z.number().optional(),
+      coordinateSpace: z.enum(["viewport", "page", "screenshot"]).default("viewport"),
+    })
+    .optional(),
+  metadata: z.record(z.unknown()).default({}),
 });
 
 export const TimelineEventSchema = z.object({

@@ -1,6 +1,10 @@
+export type AnnotationKind = "rectangle" | "arrow" | "freehand" | "text" | "pin";
+
 export interface AnnotationDraft {
-  id: string;
-  kind: "rectangle" | "arrow" | "text" | "pin";
+  annotationId: string;
+  type: AnnotationKind;
+  targetElementRefs: string[];
+  text?: string;
 }
 
 export function createAnnotationId(prefix = "a"): string {

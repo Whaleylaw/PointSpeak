@@ -19,9 +19,35 @@ type ElementMetadata = {
   metadata: Record<string, unknown>;
 };
 
+type AnnotationDraft = {
+  annotationId: string;
+  type: "rectangle" | "pin";
+  timestampMs: number;
+  text?: string;
+  targetElementRefs: string[];
+  color: string;
+  shape: {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+    pageX: number;
+    pageY: number;
+    coordinateSpace: "viewport";
+  };
+  metadata: Record<string, unknown>;
+};
+
+const ANNOTATION_COLOR = "#f97316";
+
 let pickOverlay: HTMLDivElement | null = null;
 let hoverBox: HTMLDivElement | null = null;
 let activeSessionId: string | null = null;
+let activeElementRef: string | null = null;
+let annotationOverlay: HTMLDivElement | null = null;
+let annotationBox: HTMLDivElement | null = null;
+let annotationStart: { x: number; y: number } | null = null;
+let annotationLatest: { x: number; y: number } | null = null;
 
 function cssPath(element: Element): string {
   const parts: string[] = [];
@@ -202,10 +228,11 @@ async function handlePickClick(event: MouseEvent): Promise<void> {
   const target = document.elementFromPoint(event.clientX, event.clientY);
   if (!target || !activeSessionId) return;
   const metadata = await elementMetadata(target);
+  const sessionId = activeSessionId;
   removePickMode();
   chrome.runtime.sendMessage({
     type: "POINTSPEAK_ELEMENT_PICKED",
-    sessionId: activeSessionId,
+    sessionId,
     element: metadata,
   });
 }
@@ -227,11 +254,172 @@ function removePickMode(): void {
 
 function startPickMode(sessionId: string): void {
   removePickMode();
+  removeAnnotationMode();
   activeSessionId = sessionId;
   ensurePickOverlay();
   document.addEventListener("mousemove", updateHoverBox, true);
   document.addEventListener("click", handlePickClick, true);
   document.addEventListener("keydown", handlePickKeydown, true);
+}
+
+function ensureAnnotationOverlay(): void {
+  if (annotationOverlay && annotationBox) return;
+
+  annotationOverlay = document.createElement("div");
+  annotationOverlay.id = "pointspeak-annotation-overlay";
+  Object.assign(annotationOverlay.style, {
+    position: "fixed",
+    inset: "0",
+    zIndex: "2147483645",
+    cursor: "crosshair",
+    background: "rgba(17, 24, 39, 0.04)",
+  });
+
+  const pill = document.createElement("div");
+  pill.textContent = "PointSpeak: drag a rectangle for the agent, then add a short note · Esc to skip";
+  Object.assign(pill.style, {
+    position: "fixed",
+    top: "12px",
+    left: "50%",
+    transform: "translateX(-50%)",
+    background: "#111827",
+    color: "white",
+    padding: "8px 12px",
+    borderRadius: "999px",
+    font: "13px system-ui, sans-serif",
+    boxShadow: "0 6px 20px rgba(0,0,0,.25)",
+    pointerEvents: "none",
+  });
+
+  annotationBox = document.createElement("div");
+  annotationBox.id = "pointspeak-annotation-box";
+  Object.assign(annotationBox.style, {
+    position: "fixed",
+    border: `3px solid ${ANNOTATION_COLOR}`,
+    background: "rgba(249, 115, 22, 0.14)",
+    boxSizing: "border-box",
+    display: "none",
+    pointerEvents: "none",
+  });
+
+  annotationOverlay.append(pill, annotationBox);
+  document.documentElement.append(annotationOverlay);
+}
+
+function updateAnnotationBox(): void {
+  if (!annotationBox || !annotationStart || !annotationLatest) return;
+  const left = Math.min(annotationStart.x, annotationLatest.x);
+  const top = Math.min(annotationStart.y, annotationLatest.y);
+  const width = Math.abs(annotationLatest.x - annotationStart.x);
+  const height = Math.abs(annotationLatest.y - annotationStart.y);
+  Object.assign(annotationBox.style, {
+    display: "block",
+    left: `${left}px`,
+    top: `${top}px`,
+    width: `${Math.max(width, 1)}px`,
+    height: `${Math.max(height, 1)}px`,
+  });
+}
+
+function handleAnnotationMouseDown(event: MouseEvent): void {
+  if (!annotationOverlay || event.target !== annotationOverlay) return;
+  event.preventDefault();
+  event.stopPropagation();
+  annotationStart = { x: event.clientX, y: event.clientY };
+  annotationLatest = { ...annotationStart };
+  updateAnnotationBox();
+}
+
+function handleAnnotationMouseMove(event: MouseEvent): void {
+  if (!annotationStart) return;
+  event.preventDefault();
+  event.stopPropagation();
+  annotationLatest = { x: event.clientX, y: event.clientY };
+  updateAnnotationBox();
+}
+
+function buildAnnotation(text?: string): AnnotationDraft | null {
+  if (!annotationStart || !annotationLatest || !activeElementRef) return null;
+  const left = Math.min(annotationStart.x, annotationLatest.x);
+  const top = Math.min(annotationStart.y, annotationLatest.y);
+  const width = Math.abs(annotationLatest.x - annotationStart.x);
+  const height = Math.abs(annotationLatest.y - annotationStart.y);
+  const isPin = width < 8 && height < 8;
+
+  return {
+    annotationId: `a_${Date.now().toString(36)}`,
+    type: isPin ? "pin" : "rectangle",
+    timestampMs: 0,
+    text: text?.trim() || undefined,
+    targetElementRefs: [activeElementRef],
+    color: ANNOTATION_COLOR,
+    shape: {
+      x: left,
+      y: top,
+      width: isPin ? 1 : width,
+      height: isPin ? 1 : height,
+      pageX: left + window.scrollX,
+      pageY: top + window.scrollY,
+      coordinateSpace: "viewport",
+    },
+    metadata: {
+      url: location.href,
+      viewport: { width: window.innerWidth, height: window.innerHeight, devicePixelRatio: window.devicePixelRatio || 1 },
+      scroll: { x: window.scrollX, y: window.scrollY },
+    },
+  };
+}
+
+function handleAnnotationMouseUp(event: MouseEvent): void {
+  if (!annotationStart || !activeSessionId) return;
+  event.preventDefault();
+  event.stopPropagation();
+  annotationLatest = { x: event.clientX, y: event.clientY };
+  updateAnnotationBox();
+
+  const sessionId = activeSessionId;
+  const note = window.prompt("PointSpeak note for the agent?", "Look here");
+  const annotation = buildAnnotation(note ?? undefined);
+  removeAnnotationMode();
+  if (!annotation) return;
+  chrome.runtime.sendMessage({
+    type: "POINTSPEAK_ANNOTATION_CREATED",
+    sessionId,
+    annotation,
+  });
+}
+
+function handleAnnotationKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape") {
+    removeAnnotationMode();
+    chrome.runtime.sendMessage({ type: "POINTSPEAK_ANNOTATION_CANCELLED", sessionId: activeSessionId });
+  }
+}
+
+function removeAnnotationMode(): void {
+  document.removeEventListener("mousedown", handleAnnotationMouseDown, true);
+  document.removeEventListener("mousemove", handleAnnotationMouseMove, true);
+  document.removeEventListener("mouseup", handleAnnotationMouseUp, true);
+  document.removeEventListener("keydown", handleAnnotationKeydown, true);
+  annotationOverlay?.remove();
+  annotationOverlay = null;
+  annotationBox = null;
+  annotationStart = null;
+  annotationLatest = null;
+  activeSessionId = null;
+  activeElementRef = null;
+}
+
+function startAnnotationMode(sessionId: string, elementRef: string): void {
+  removePickMode();
+  removeAnnotationMode();
+  activeSessionId = sessionId;
+  activeElementRef = elementRef;
+  ensureAnnotationOverlay();
+  document.addEventListener("mousedown", handleAnnotationMouseDown, true);
+  document.addEventListener("mousemove", handleAnnotationMouseMove, true);
+  document.addEventListener("mouseup", handleAnnotationMouseUp, true);
+  document.addEventListener("keydown", handleAnnotationKeydown, true);
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -247,6 +435,16 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === "POINTSPEAK_START_ELEMENT_PICK" && typeof message.sessionId === "string") {
     startPickMode(message.sessionId);
+    sendResponse({ ok: true });
+    return true;
+  }
+
+  if (
+    message?.type === "POINTSPEAK_START_ANNOTATION" &&
+    typeof message.sessionId === "string" &&
+    typeof message.elementRef === "string"
+  ) {
+    startAnnotationMode(message.sessionId, message.elementRef);
     sendResponse({ ok: true });
     return true;
   }

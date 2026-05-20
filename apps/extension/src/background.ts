@@ -22,6 +22,20 @@ type CaptureSession = {
   manifest: string;
 };
 
+type AddElementResponse = {
+  sessionId: string;
+  elementRef: string;
+  elementsPath: string;
+  handoff: string;
+};
+
+type AddAnnotationResponse = {
+  sessionId: string;
+  annotationId: string;
+  annotationsPath: string;
+  handoff: string;
+};
+
 async function setBadge(text: string, color: string): Promise<void> {
   await chrome.action.setBadgeText({ text });
   await chrome.action.setBadgeBackgroundColor({ color });
@@ -59,7 +73,11 @@ async function startElementPick(tabId: number, sessionId: string): Promise<void>
   await chrome.tabs.sendMessage(tabId, { type: "POINTSPEAK_START_ELEMENT_PICK", sessionId });
 }
 
-async function postPickedElement(sessionId: string, element: unknown): Promise<unknown> {
+async function startAnnotation(tabId: number, sessionId: string, elementRef: string): Promise<void> {
+  await chrome.tabs.sendMessage(tabId, { type: "POINTSPEAK_START_ANNOTATION", sessionId, elementRef });
+}
+
+async function postPickedElement(sessionId: string, element: unknown): Promise<AddElementResponse> {
   const response = await fetch(`${RECEIVER_URL}/sessions/${sessionId}/elements`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -69,7 +87,20 @@ async function postPickedElement(sessionId: string, element: unknown): Promise<u
   if (!response.ok) {
     throw new Error(`PointSpeak receiver rejected element: ${await response.text()}`);
   }
-  return response.json();
+  return response.json() as Promise<AddElementResponse>;
+}
+
+async function postAnnotation(sessionId: string, annotation: unknown): Promise<AddAnnotationResponse> {
+  const response = await fetch(`${RECEIVER_URL}/sessions/${sessionId}/annotations`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ annotation }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`PointSpeak receiver rejected annotation: ${await response.text()}`);
+  }
+  return response.json() as Promise<AddAnnotationResponse>;
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -117,11 +148,33 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "POINTSPEAK_ELEMENT_PICKED" && typeof message.sessionId === "string") {
     postPickedElement(message.sessionId, message.element)
       .then(async (result) => {
         await chrome.storage.local.set({ lastPointSpeakElement: result, lastPointSpeakError: null });
+        if (sender.tab?.id) {
+          await setBadge("DRAW", "#f97316");
+          await startAnnotation(sender.tab.id, message.sessionId, result.elementRef);
+        } else {
+          await setBadge("OK", "#16a34a");
+          await clearBadgeSoon();
+        }
+        sendResponse({ ok: true, result });
+      })
+      .catch(async (error) => {
+        await setBadge("ERR", "#dc2626");
+        await clearBadgeSoon();
+        await chrome.storage.local.set({ lastPointSpeakError: error instanceof Error ? error.message : String(error) });
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+    return true;
+  }
+
+  if (message?.type === "POINTSPEAK_ANNOTATION_CREATED" && typeof message.sessionId === "string") {
+    postAnnotation(message.sessionId, message.annotation)
+      .then(async (result) => {
+        await chrome.storage.local.set({ lastPointSpeakAnnotation: result, lastPointSpeakError: null });
         await setBadge("OK", "#16a34a");
         await clearBadgeSoon();
         sendResponse({ ok: true, result });
@@ -137,6 +190,11 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   if (message?.type === "POINTSPEAK_ELEMENT_PICK_CANCELLED") {
     setBadge("CXL", "#6b7280").then(clearBadgeSoon).catch(console.error);
+    return false;
+  }
+
+  if (message?.type === "POINTSPEAK_ANNOTATION_CANCELLED") {
+    setBadge("SKIP", "#6b7280").then(clearBadgeSoon).catch(console.error);
     return false;
   }
 

@@ -74,6 +74,27 @@ class ElementRef(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class AnnotationShape(BaseModel):
+    x: float
+    y: float
+    width: float
+    height: float
+    pageX: float | None = None
+    pageY: float | None = None
+    coordinateSpace: Literal["viewport", "page", "screenshot"] = "viewport"
+
+
+class Annotation(BaseModel):
+    annotationId: str
+    type: Literal["rectangle", "arrow", "freehand", "text", "pin"]
+    timestampMs: float = 0
+    text: str | None = None
+    targetElementRefs: list[str] = Field(default_factory=list)
+    color: str | None = None
+    shape: AnnotationShape | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class CreateSessionRequest(BaseModel):
     mode: Literal["snapshot", "walkthrough", "live"] = "snapshot"
     source: str = "chrome-extension"
@@ -96,6 +117,17 @@ class AddElementResponse(BaseModel):
     sessionId: str
     elementRef: str
     elementsPath: str
+    handoff: str
+
+
+class AddAnnotationRequest(BaseModel):
+    annotation: Annotation
+
+
+class AddAnnotationResponse(BaseModel):
+    sessionId: str
+    annotationId: str
+    annotationsPath: str
     handoff: str
 
 
@@ -171,9 +203,21 @@ def element_label(element: dict[str, Any]) -> str:
     return ": ".join([parts[0], " ".join(parts[1:])]) if len(parts) > 1 else parts[0]
 
 
+def annotation_label(annotation: dict[str, Any]) -> str:
+    parts = [annotation.get("annotationId", "annotation")]
+    annotation_type = annotation.get("type")
+    text = annotation.get("text")
+    if annotation_type:
+        parts.append(str(annotation_type))
+    if text:
+        parts.append(json.dumps(str(text)[:160]))
+    return ": ".join([parts[0], " ".join(parts[1:])]) if len(parts) > 1 else parts[0]
+
+
 def render_handoff(session_id: str, root: Path, media: list[str]) -> str:
     page = load_page(root)
     elements = read_ndjson(root / "elements.ndjson")
+    annotations = read_ndjson(root / "annotations.ndjson")
     screenshot_line = f"- Screenshot: {root / media[0]}" if media else "- Screenshot: _not captured_"
     title = page.get("title") or session_id
     viewport = page.get("viewport") or {}
@@ -193,10 +237,23 @@ def render_handoff(session_id: str, root: Path, media: list[str]) -> str:
         element_lines.append(f"- {element_label(element)}\n  - bbox: {bbox_text}\n{selector_lines}".rstrip())
     referenced_elements = "\n".join(element_lines) if element_lines else "_None captured yet. Use element pick mode after snapshot capture._"
 
+    annotation_lines: list[str] = []
+    for annotation in annotations:
+        shape = annotation.get("shape") or {}
+        shape_text = (
+            f"x={shape.get('x')}, y={shape.get('y')}, w={shape.get('width')}, h={shape.get('height')} ({shape.get('coordinateSpace', 'viewport')})"
+            if shape
+            else "not captured"
+        )
+        targets = annotation.get("targetElementRefs") or []
+        target_text = ", ".join(targets) if targets else "none"
+        annotation_lines.append(f"- {annotation_label(annotation)}\n  - target elements: {target_text}\n  - shape: {shape_text}".rstrip())
+    annotation_block = "\n".join(annotation_lines) if annotation_lines else "_None captured yet. Use annotation overlay after selecting an element._"
+
     return f"""# PointSpeak Brief: {title}
 
 ## User Request
-_No user note captured yet. Milestone 2 captures selected elements only._
+_No standalone user request captured yet. Milestone 3 captures visual annotations and notes._
 
 ## Page
 - URL: {page.get('url', '')}
@@ -209,7 +266,7 @@ _No user note captured yet. Milestone 2 captures selected elements only._
 {referenced_elements}
 
 ## Annotations
-_None captured yet. Annotation overlay starts in Milestone 3._
+{annotation_block}
 
 ## Artifacts
 - Session ID: {session_id}
@@ -272,6 +329,7 @@ def refresh_handoff_and_manifest(root: Path, session_id: str) -> None:
             "page": load_page(root),
             "media": media,
             "elements": read_ndjson(root / "elements.ndjson"),
+            "annotations": read_ndjson(root / "annotations.ndjson"),
         },
     )
     write_manifest(
@@ -356,6 +414,7 @@ def get_session(session_id: str) -> dict[str, object]:
         "bundlePath": str(root),
         "manifest": load_manifest(root),
         "elements": read_ndjson(root / "elements.ndjson"),
+        "annotations": read_ndjson(root / "annotations.ndjson"),
     }
 
 
@@ -379,6 +438,32 @@ def add_element(session_id: str, req: AddElementRequest) -> AddElementResponse:
         sessionId=session_id,
         elementRef=req.element.elementRef,
         elementsPath=str(root / "elements.ndjson"),
+        handoff=str(root / "handoff" / "latest.md"),
+    )
+
+
+@app.post("/sessions/{session_id}/annotations", response_model=AddAnnotationResponse)
+def add_annotation(session_id: str, req: AddAnnotationRequest) -> AddAnnotationResponse:
+    root = require_session_root(session_id)
+    annotation_data = req.annotation.model_dump(mode="json", exclude_none=True)
+    append_ndjson(root / "annotations.ndjson", annotation_data)
+    append_ndjson(
+        root / "timeline.ndjson",
+        {
+            "eventId": f"t_{uuid.uuid4().hex}",
+            "timestampMs": req.annotation.timestampMs,
+            "type": "annotation.created",
+            "data": {
+                "annotationId": req.annotation.annotationId,
+                "targetElementRefs": req.annotation.targetElementRefs,
+            },
+        },
+    )
+    refresh_handoff_and_manifest(root, session_id)
+    return AddAnnotationResponse(
+        sessionId=session_id,
+        annotationId=req.annotation.annotationId,
+        annotationsPath=str(root / "annotations.ndjson"),
         handoff=str(root / "handoff" / "latest.md"),
     )
 

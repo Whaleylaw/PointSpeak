@@ -15,17 +15,26 @@ type LastElement = {
   handoff: string;
 };
 
+type LastAnnotation = {
+  sessionId: string;
+  annotationId: string;
+  annotationsPath: string;
+  handoff: string;
+};
+
 function App() {
   const [session, setSession] = useState<LastSession | null>(null);
   const [element, setElement] = useState<LastElement | null>(null);
+  const [annotation, setAnnotation] = useState<LastAnnotation | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     chrome.storage.local
-      .get(["lastPointSpeakSession", "lastPointSpeakElement", "lastPointSpeakError"])
+      .get(["lastPointSpeakSession", "lastPointSpeakElement", "lastPointSpeakAnnotation", "lastPointSpeakError"])
       .then((value) => {
         setSession((value.lastPointSpeakSession as LastSession | undefined) ?? null);
         setElement((value.lastPointSpeakElement as LastElement | undefined) ?? null);
+        setAnnotation((value.lastPointSpeakAnnotation as LastAnnotation | undefined) ?? null);
         setError((value.lastPointSpeakError as string | undefined) ?? null);
       });
   }, []);
@@ -33,7 +42,10 @@ function App() {
   return (
     <main style={{ fontFamily: "system-ui", padding: 16, lineHeight: 1.4 }}>
       <h1>PointSpeak</h1>
-      <p>Click the extension button to capture the active tab, then click an element on the page to attach metadata.</p>
+      <p>
+        Click the extension button to capture the active tab, click an element, then drag a rectangle to annotate what the
+        agent should inspect.
+      </p>
       <p>
         Receiver: <code>http://127.0.0.1:48321</code>
       </p>
@@ -69,6 +81,21 @@ function App() {
             <dt>Elements File</dt>
             <dd>
               <code>{element.elementsPath}</code>
+            </dd>
+          </dl>
+        </section>
+      ) : null}
+      {annotation ? (
+        <section>
+          <h2>Last Annotation</h2>
+          <dl>
+            <dt>Annotation</dt>
+            <dd>
+              <code>{annotation.annotationId}</code>
+            </dd>
+            <dt>Annotations File</dt>
+            <dd>
+              <code>{annotation.annotationsPath}</code>
             </dd>
           </dl>
         </section>
