@@ -56,8 +56,36 @@ def run() -> None:
         if "snapshot.captured" not in timeline or "visualHash" not in timeline:
             raise AssertionError(f"Unexpected timeline: {timeline}")
 
+        element_result = main.add_element(
+            result.sessionId,
+            main.AddElementRequest(
+                element=main.ElementRef(
+                    elementRef="e_smoke",
+                    timestampMs=0,
+                    url="http://localhost:5173/smoke",
+                    role="button",
+                    name="Smoke Button",
+                    text="Smoke Button",
+                    tagName="button",
+                    boundingBox=main.BoundingBox(x=10, y=20, width=100, height=40),
+                    selectors=[main.Selector(type="aria", value='button[name="Smoke Button"]', confidence=0.9)],
+                    domPath="html > body > button",
+                    stateHash="smoke-state",
+                )
+            ),
+        )
+        if element_result.elementRef != "e_smoke":
+            raise AssertionError(f"Unexpected element response: {element_result}")
+        elements_text = (bundle / "elements.ndjson").read_text()
+        if "e_smoke" not in elements_text:
+            raise AssertionError("Element not appended")
+        handoff = (bundle / "handoff" / "latest.md").read_text()
+        if "Smoke Button" not in handoff:
+            raise AssertionError("Handoff did not include selected element")
+
         print("receiver smoke ok")
         print(result.model_dump())
+        print(element_result.model_dump())
 
 
 if __name__ == "__main__":

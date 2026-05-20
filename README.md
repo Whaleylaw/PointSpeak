@@ -6,9 +6,9 @@ PointSpeak captures screenshots, annotations, DOM/element metadata, and later na
 
 ## Current Status
 
-Milestone 1 snapshot capture is implemented:
+Milestone 2 element selection is implemented:
 
-- `apps/extension` — Chrome MV3 extension that captures the active visible tab.
+- `apps/extension` — Chrome MV3 extension that captures the active visible tab and starts element-pick mode.
 - `apps/receiver` — local FastAPI receiver that writes `.pointspeak` bundles.
 - `packages/schema` — shared TypeScript schema definitions.
 - `packages/annotator` — placeholder annotation package.
@@ -35,7 +35,7 @@ pip install -e .
 pointspeak-receiver
 ```
 
-Then load `apps/extension/dist` as an unpacked Chrome extension. Clicking the PointSpeak toolbar button captures the active tab screenshot and page metadata into:
+Then load `apps/extension/dist` as an unpacked Chrome extension. Clicking the PointSpeak toolbar button captures the active tab screenshot and page metadata, then prompts you to click a page element. The bundle is written into:
 
 ```text
 ~/.pointspeak/sessions/<session>/session.pointspeak/

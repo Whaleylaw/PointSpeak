@@ -15,6 +15,13 @@ type PageMetadata = {
   capturedAt: string;
 };
 
+type CaptureSession = {
+  sessionId: string;
+  bundlePath: string;
+  handoff: string;
+  manifest: string;
+};
+
 async function setBadge(text: string, color: string): Promise<void> {
   await chrome.action.setBadgeText({ text });
   await chrome.action.setBadgeBackgroundColor({ color });
@@ -48,6 +55,23 @@ async function readPageMetadata(tabId: number): Promise<PageMetadata> {
   return pageResult.result as PageMetadata;
 }
 
+async function startElementPick(tabId: number, sessionId: string): Promise<void> {
+  await chrome.tabs.sendMessage(tabId, { type: "POINTSPEAK_START_ELEMENT_PICK", sessionId });
+}
+
+async function postPickedElement(sessionId: string, element: unknown): Promise<unknown> {
+  const response = await fetch(`${RECEIVER_URL}/sessions/${sessionId}/elements`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ element }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`PointSpeak receiver rejected element: ${await response.text()}`);
+  }
+  return response.json();
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.action.setTitle({ title: "Capture PointSpeak snapshot" }).catch(console.error);
 });
@@ -78,11 +102,11 @@ chrome.action.onClicked.addListener(async (tab) => {
       throw new Error(`PointSpeak receiver rejected session: ${await response.text()}`);
     }
 
-    const session = await response.json();
-    await chrome.storage.local.set({ lastPointSpeakSession: session });
-    await setBadge("OK", "#16a34a");
-    await clearBadgeSoon();
-    console.log("PointSpeak session created", session);
+    const session = (await response.json()) as CaptureSession;
+    await chrome.storage.local.set({ lastPointSpeakSession: session, lastPointSpeakError: null });
+    await setBadge("PICK", "#7c3aed");
+    await startElementPick(tab.id, session.sessionId);
+    console.log("PointSpeak session created; element pick started", session);
   } catch (error) {
     await setBadge("ERR", "#dc2626");
     await clearBadgeSoon();
@@ -91,4 +115,30 @@ chrome.action.onClicked.addListener(async (tab) => {
       lastPointSpeakError: error instanceof Error ? error.message : String(error),
     });
   }
+});
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "POINTSPEAK_ELEMENT_PICKED" && typeof message.sessionId === "string") {
+    postPickedElement(message.sessionId, message.element)
+      .then(async (result) => {
+        await chrome.storage.local.set({ lastPointSpeakElement: result, lastPointSpeakError: null });
+        await setBadge("OK", "#16a34a");
+        await clearBadgeSoon();
+        sendResponse({ ok: true, result });
+      })
+      .catch(async (error) => {
+        await setBadge("ERR", "#dc2626");
+        await clearBadgeSoon();
+        await chrome.storage.local.set({ lastPointSpeakError: error instanceof Error ? error.message : String(error) });
+        sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) });
+      });
+    return true;
+  }
+
+  if (message?.type === "POINTSPEAK_ELEMENT_PICK_CANCELLED") {
+    setBadge("CXL", "#6b7280").then(clearBadgeSoon).catch(console.error);
+    return false;
+  }
+
+  return false;
 });

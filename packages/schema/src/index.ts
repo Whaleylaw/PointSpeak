@@ -37,10 +37,12 @@ export const ElementRefSchema = z.object({
   role: z.string().optional(),
   name: z.string().optional(),
   text: z.string().optional(),
+  tagName: z.string().optional(),
   boundingBox: BoundingBoxSchema.optional(),
   selectors: z.array(SelectorSchema).default([]),
   domPath: z.string().optional(),
   stateHash: z.string().optional(),
+  metadata: z.record(z.unknown()).default({}),
 });
 
 export const AnnotationSchema = z.object({

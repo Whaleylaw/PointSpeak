@@ -21,6 +21,16 @@ The current implementation supports snapshot capture:
 - Receiver writes the bundle directory, screenshot, page metadata, timeline, privacy report, handoff files, and manifest with SHA-256 file hashes.
 - Receiver exposes `GET /sessions/{session_id}` and `GET /sessions/{session_id}/handoff.md`.
 
+## Milestone 2 Implementation
+
+The current implementation also supports element selection:
+
+- After snapshot capture, the extension asks the content script to enter element-pick mode.
+- The content script displays a small instruction pill and hover rectangle.
+- Clicking an element extracts role/name/text/tag/bounding box, selector alternatives, DOM path, and a state hash.
+- The background service worker posts that element to `POST /sessions/{session_id}/elements`.
+- Receiver appends the element to `elements.ndjson`, appends an `element.selected` timeline event, refreshes handoff files, and rewrites manifest hashes.
+
 ## Design Principles
 
 - Screenshot is the visual source of truth.
