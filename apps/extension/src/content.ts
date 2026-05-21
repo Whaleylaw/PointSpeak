@@ -50,6 +50,8 @@ let annotationStart: { x: number; y: number } | null = null;
 let annotationLatest: { x: number; y: number } | null = null;
 let narrationOverlay: HTMLDivElement | null = null;
 let activeAnnotationRef: string | null = null;
+let lastHoverTarget: Element | null = null;
+let pickInFlight = false;
 
 function cssPath(element: Element): string {
   const parts: string[] = [];
@@ -207,13 +209,20 @@ function removePickOverlay(): void {
   hoverBox = null;
 }
 
+function pointTarget(x: number, y: number): Element | null {
+  const target = document.elementFromPoint(x, y);
+  if (!target || target === pickOverlay || target === hoverBox || target.id?.startsWith("pointspeak-")) return null;
+  return target;
+}
+
 function updateHoverBox(event: MouseEvent): void {
   if (!hoverBox) return;
-  const target = document.elementFromPoint(event.clientX, event.clientY);
-  if (!target || target === pickOverlay || target === hoverBox) {
+  const target = pointTarget(event.clientX, event.clientY);
+  if (!target) {
     hoverBox.style.display = "none";
     return;
   }
+  lastHoverTarget = target;
   const rect = target.getBoundingClientRect();
   Object.assign(hoverBox.style, {
     display: "block",
@@ -224,19 +233,34 @@ function updateHoverBox(event: MouseEvent): void {
   });
 }
 
-async function handlePickClick(event: MouseEvent): Promise<void> {
+async function handlePickPointer(event: MouseEvent | PointerEvent): Promise<void> {
   event.preventDefault();
   event.stopPropagation();
-  const target = document.elementFromPoint(event.clientX, event.clientY);
-  if (!target || !activeSessionId) return;
-  const metadata = await elementMetadata(target);
+  event.stopImmediatePropagation();
+  if (pickInFlight || !activeSessionId) return;
+  pickInFlight = true;
+  const target = pointTarget(event.clientX, event.clientY) || lastHoverTarget;
+  if (!target) {
+    pickInFlight = false;
+    return;
+  }
   const sessionId = activeSessionId;
-  removePickMode();
-  chrome.runtime.sendMessage({
-    type: "POINTSPEAK_ELEMENT_PICKED",
-    sessionId,
-    element: metadata,
-  });
+  try {
+    const metadata = await elementMetadata(target);
+    removePickMode();
+    chrome.runtime.sendMessage({
+      type: "POINTSPEAK_ELEMENT_PICKED",
+      sessionId,
+      element: metadata,
+    });
+  } catch (error) {
+    pickInFlight = false;
+    chrome.runtime.sendMessage({
+      type: "POINTSPEAK_ELEMENT_PICK_FAILED",
+      sessionId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 function handlePickKeydown(event: KeyboardEvent): void {
@@ -248,9 +272,16 @@ function handlePickKeydown(event: KeyboardEvent): void {
 
 function removePickMode(): void {
   document.removeEventListener("mousemove", updateHoverBox, true);
-  document.removeEventListener("click", handlePickClick, true);
+  document.removeEventListener("pointerdown", handlePickPointer, true);
+  document.removeEventListener("mousedown", handlePickPointer, true);
+  document.removeEventListener("click", handlePickPointer, true);
+  window.removeEventListener("pointerdown", handlePickPointer, true);
+  window.removeEventListener("mousedown", handlePickPointer, true);
+  window.removeEventListener("click", handlePickPointer, true);
   document.removeEventListener("keydown", handlePickKeydown, true);
   activeSessionId = null;
+  lastHoverTarget = null;
+  pickInFlight = false;
   removePickOverlay();
 }
 
@@ -260,7 +291,12 @@ function startPickMode(sessionId: string): void {
   activeSessionId = sessionId;
   ensurePickOverlay();
   document.addEventListener("mousemove", updateHoverBox, true);
-  document.addEventListener("click", handlePickClick, true);
+  document.addEventListener("pointerdown", handlePickPointer, true);
+  document.addEventListener("mousedown", handlePickPointer, true);
+  document.addEventListener("click", handlePickPointer, true);
+  window.addEventListener("pointerdown", handlePickPointer, true);
+  window.addEventListener("mousedown", handlePickPointer, true);
+  window.addEventListener("click", handlePickPointer, true);
   document.addEventListener("keydown", handlePickKeydown, true);
 }
 

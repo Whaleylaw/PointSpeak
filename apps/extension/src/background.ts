@@ -383,6 +383,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+
+  if (message?.type === "POINTSPEAK_ELEMENT_PICK_FAILED") {
+    setBadge("ERR", "#dc2626").then(clearBadgeSoon).catch(console.error);
+    chrome.storage.local.set({ lastPointSpeakError: message.error || "Element pick failed" }).catch(console.error);
+    return false;
+  }
+
   if (message?.type === "POINTSPEAK_ELEMENT_PICK_CANCELLED") {
     setBadge("CXL", "#6b7280").then(clearBadgeSoon).catch(console.error);
     return false;
