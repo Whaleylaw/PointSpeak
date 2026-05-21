@@ -469,6 +469,23 @@ function blobToDataUrl(blob: Blob): Promise<string> {
   });
 }
 
+function errorText(error: unknown): string {
+  if (error instanceof DOMException) return [error.name, error.message].filter(Boolean).join(": ") || "DOMException";
+  if (error instanceof Error) return [error.name, error.message].filter(Boolean).join(": ") || "Error";
+  return String(error || "Unknown error");
+}
+
+function openExtensionRecorder(sessionId: string, elementRef: string | null, annotationId: string | null): Promise<void> {
+  return chrome.runtime.sendMessage({
+    type: "POINTSPEAK_OPEN_RECORDER",
+    sessionId,
+    elementRef: elementRef || undefined,
+    annotationId: annotationId || undefined,
+  }).then((response) => {
+    if (!response?.ok) throw new Error(response?.error || "Recorder window could not be opened");
+  });
+}
+
 function removeNarrationMode(): void {
   narrationOverlay?.remove();
   narrationOverlay = null;
@@ -504,7 +521,7 @@ function startNarrationMode(sessionId: string, elementRef?: string, annotationRe
     top: "12px",
     right: "12px",
     zIndex: "2147483647",
-    width: "320px",
+    width: "360px",
     background: "#111827",
     color: "white",
     padding: "12px",
@@ -517,14 +534,18 @@ function startNarrationMode(sessionId: string, elementRef?: string, annotationRe
   title.textContent = "PointSpeak narration";
   title.style.fontWeight = "700";
   const help = document.createElement("p");
-  help.textContent = "Optionally record a short voice note for the agent. You can skip this step.";
+  help.textContent = "Record as long as you need. PointSpeak will only send after you explicitly click Stop & Send.";
   help.style.margin = "8px 0";
 
   const controls = document.createElement("div");
-  Object.assign(controls.style, { display: "flex", gap: "8px" });
-  const recordButton = createNarrationButton("Record");
+  Object.assign(controls.style, { display: "flex", gap: "8px", flexWrap: "wrap" });
+  const recordButton = createNarrationButton("Start recording");
   recordButton.style.background = "#ef4444";
   recordButton.style.color = "white";
+  const sendButton = createNarrationButton("Send captured audio");
+  sendButton.style.background = "#16a34a";
+  sendButton.style.color = "white";
+  sendButton.style.display = "none";
   const skipButton = createNarrationButton("Skip");
   skipButton.style.background = "#374151";
   skipButton.style.color = "white";
@@ -532,64 +553,153 @@ function startNarrationMode(sessionId: string, elementRef?: string, annotationRe
   status.textContent = "Ready";
   status.style.marginTop = "8px";
 
-  controls.append(recordButton, skipButton);
+  controls.append(recordButton, sendButton, skipButton);
   narrationOverlay.append(title, help, controls, status);
   document.documentElement.append(narrationOverlay);
 
+  let recorder: MediaRecorder | null = null;
+  let stream: MediaStream | null = null;
+  let startedAt = 0;
+  let chunks: Blob[] = [];
+  let stopWasRequestedByUser = false;
+  let capturedBlob: Blob | null = null;
+
+  const cleanupStream = () => {
+    stream?.getTracks().forEach((track) => track.stop());
+    stream = null;
+  };
+
+  const sendCapturedNarration = async () => {
+    if (!capturedBlob || !activeSessionId) return;
+    try {
+      recordButton.disabled = true;
+      sendButton.disabled = true;
+      skipButton.disabled = true;
+      status.textContent = "Saving narration…";
+      const audioDataUrl = await blobToDataUrl(capturedBlob);
+      const currentSessionId = activeSessionId;
+      const narration = {
+        narrationId: `n_${Date.now().toString(36)}`,
+        timestampMs: 0,
+        durationMs: Math.max(0, Date.now() - startedAt),
+        audioDataUrl,
+        mimeType: capturedBlob.type || "audio/webm",
+        targetElementRefs: activeElementRef ? [activeElementRef] : [],
+        targetAnnotationRefs: activeAnnotationRef ? [activeAnnotationRef] : [],
+        metadata: {
+          url: location.href,
+          source: "chrome-extension-mediarecorder",
+          explicitStop: stopWasRequestedByUser,
+        },
+      };
+      status.textContent = "Sending package…";
+      chrome.runtime.sendMessage({ type: "POINTSPEAK_NARRATION_CAPTURED", sessionId: currentSessionId, narration }, (response) => {
+        if (chrome.runtime.lastError || !response?.ok) {
+          status.textContent = `Send failed: ${chrome.runtime.lastError?.message || response?.error || "Unknown error"}`;
+          recordButton.disabled = false;
+          sendButton.disabled = false;
+          skipButton.disabled = false;
+          return;
+        }
+        removeNarrationMode();
+      });
+    } catch (error) {
+      status.textContent = `Narration save failed: ${errorText(error)}`;
+      recordButton.disabled = false;
+      sendButton.disabled = false;
+      skipButton.disabled = false;
+    }
+  };
+
   skipButton.addEventListener("click", () => {
+    if (recorder?.state === "recording") {
+      stopWasRequestedByUser = false;
+      recorder.stop();
+    }
+    cleanupStream();
     const currentSessionId = activeSessionId;
     removeNarrationMode();
     chrome.runtime.sendMessage({ type: "POINTSPEAK_NARRATION_SKIPPED", sessionId: currentSessionId });
   });
 
+  sendButton.addEventListener("click", () => {
+    void sendCapturedNarration();
+  });
+
   recordButton.addEventListener("click", async () => {
     if (!activeSessionId) return;
+
+    if (recorder?.state === "recording") {
+      stopWasRequestedByUser = true;
+      recordButton.disabled = true;
+      status.textContent = "Stopping and preparing to send…";
+      recorder.stop();
+      return;
+    }
+
+    if (capturedBlob) {
+      // Re-record after an unexpected stop or user review.
+      capturedBlob = null;
+      chunks = [];
+      sendButton.style.display = "none";
+    }
+
     try {
       recordButton.disabled = true;
+      sendButton.style.display = "none";
       status.textContent = "Requesting microphone…";
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const chunks: Blob[] = [];
-      const recorder = new MediaRecorder(stream, { mimeType: MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" : undefined });
-      const startedAt = Date.now();
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      chunks = [];
+      stopWasRequestedByUser = false;
+      recorder = new MediaRecorder(stream, MediaRecorder.isTypeSupported("audio/webm") ? { mimeType: "audio/webm" } : undefined);
+      startedAt = Date.now();
+
       recorder.addEventListener("dataavailable", (event) => {
         if (event.data.size > 0) chunks.push(event.data);
       });
-      recorder.addEventListener("stop", async () => {
-        stream.getTracks().forEach((track) => track.stop());
-        const blob = new Blob(chunks, { type: recorder.mimeType || "audio/webm" });
-        const audioDataUrl = await blobToDataUrl(blob);
-        const transcript = window.prompt("Optional transcript/summary for this voice note?", "") || undefined;
-        const currentSessionId = activeSessionId;
-        const narration = {
-          narrationId: `n_${Date.now().toString(36)}`,
-          timestampMs: 0,
-          durationMs: Date.now() - startedAt,
-          transcript: transcript?.trim() || undefined,
-          audioDataUrl,
-          mimeType: blob.type || "audio/webm",
-          targetElementRefs: activeElementRef ? [activeElementRef] : [],
-          targetAnnotationRefs: activeAnnotationRef ? [activeAnnotationRef] : [],
-          metadata: {
-            url: location.href,
-            source: "chrome-extension-mediarecorder",
-          },
-        };
-        removeNarrationMode();
-        chrome.runtime.sendMessage({ type: "POINTSPEAK_NARRATION_CAPTURED", sessionId: currentSessionId, narration });
+
+      recorder.addEventListener("stop", () => {
+        cleanupStream();
+        capturedBlob = new Blob(chunks, { type: recorder?.mimeType || "audio/webm" });
+        const seconds = Math.round((Date.now() - startedAt) / 1000);
+        recordButton.disabled = false;
+        recordButton.textContent = "Record again";
+        sendButton.style.display = "inline-block";
+        skipButton.disabled = false;
+        if (stopWasRequestedByUser) {
+          status.textContent = `Recorded ${seconds}s. Sending package…`;
+          void sendCapturedNarration();
+        } else {
+          status.textContent = `Recording stopped unexpectedly after ${seconds}s. Nothing has been sent yet — click Send captured audio or Record again.`;
+        }
       });
-      recorder.start();
-      status.textContent = "Recording… click Stop or wait 15 seconds.";
-      recordButton.textContent = "Stop";
+
+      recorder.addEventListener("error", (event) => {
+        status.textContent = `Recorder error: ${errorText(event.error)}`;
+      });
+
+      recorder.start(1000);
+      recordButton.textContent = "Stop & Send";
       recordButton.disabled = false;
-      recordButton.onclick = () => {
-        if (recorder.state === "recording") recorder.stop();
-      };
-      window.setTimeout(() => {
-        if (recorder.state === "recording") recorder.stop();
-      }, 15000);
+      skipButton.disabled = false;
+      status.textContent = "Recording… click Stop & Send when finished.";
     } catch (error) {
-      status.textContent = `Mic unavailable: ${error instanceof Error ? error.message : String(error)}`;
-      recordButton.disabled = false;
+      const currentSessionId = activeSessionId;
+      const currentElementRef = activeElementRef;
+      const currentAnnotationRef = activeAnnotationRef;
+      status.textContent = `Page microphone blocked (${errorText(error)}); opening extension recorder…`;
+      recordButton.disabled = true;
+      skipButton.disabled = true;
+      if (currentSessionId) {
+        try {
+          await openExtensionRecorder(currentSessionId, currentElementRef, currentAnnotationRef);
+          removeNarrationMode();
+        } catch (fallbackError) {
+          status.textContent = `Recorder unavailable: ${errorText(fallbackError)}`;
+          recordButton.disabled = false;
+          skipButton.disabled = false;
+        }
+      }
     }
   });
 }
@@ -634,3 +744,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 
   return false;
 });
+

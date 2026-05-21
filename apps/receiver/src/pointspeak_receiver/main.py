@@ -5,6 +5,8 @@ import binascii
 import hashlib
 import json
 import os
+import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -108,6 +110,7 @@ class Narration(BaseModel):
     timestampMs: float = 0
     durationMs: float | None = None
     transcript: str | None = None
+    userSummary: str | None = None
     audioDataUrl: str | None = None
     mimeType: str = "audio/webm"
     targetElementRefs: list[str] = Field(default_factory=list)
@@ -168,6 +171,9 @@ class SubmitHandoffRequest(BaseModel):
     hermesApiUrl: str | None = None
     model: str | None = None
     instructions: str | None = None
+    sessionKey: str | None = None
+    sessionId: str | None = None
+    bridgeMode: str = "api_run"
 
 
 class SubmitHandoffResponse(BaseModel):
@@ -180,16 +186,169 @@ class SubmitHandoffResponse(BaseModel):
     error: str | None = None
 
 
+def telegram_target_from_session_key(session_key: str | None) -> str | None:
+    if not session_key:
+        return None
+    parts = session_key.split(":")
+    # Current Hermes Telegram DM keys look like: agent:main:telegram:dm:<chat_id>
+    if len(parts) >= 5 and parts[2] == "telegram" and parts[3] == "dm" and parts[4]:
+        return f"telegram:{parts[4]}"
+    # Telegram topic/group keys may include a thread id after the chat id.
+    if len(parts) >= 5 and parts[2] == "telegram" and parts[4]:
+        return "telegram:" + ":".join(parts[4:])
+    return None
+
+
 def bridge_wake_instructions(lease: dict[str, Any]) -> str:
-    notify_target = str(lease.get("notifyTarget") or os.environ.get("POINTSPEAK_NOTIFY_TARGET") or "telegram").strip()
+    notify_target = (
+        telegram_target_from_session_key(lease.get("sessionKey"))
+        or str(lease.get("notifyTarget") or os.environ.get("POINTSPEAK_NOTIFY_TARGET") or "telegram").strip()
+    )
+    agent_name = str(lease.get("agent") or "the active agent").strip()
     return (
-        "You are Coder receiving a live PointSpeak visual briefing through an active bridge lease. "
-        "Treat this as a user-initiated message from Aaron, not a passive background artifact. "
+        f"You are {agent_name} receiving a live PointSpeak visual briefing through an active bridge lease. "
+        "Treat this as a user-initiated visual-context handoff from Aaron, not as a passive background artifact. "
+        "The capture may be part of an ongoing conversation Aaron is having with your profile; preserve that project context if available. "
+        "Before doing any long-running implementation or verification, produce a concise user-facing acknowledgement that states what you understand from the capture. "
+        f"If the messaging/send_message tool is available, send that acknowledgement to `{notify_target}` immediately, then continue only if Aaron's narration clearly requested implementation and the next step is safe. "
         "Read the bundle/intake/replay paths in the prompt, summarize what Aaron pointed at, include any narration transcript, "
         "and propose or take the next concrete coding/debugging step if it is safe and obvious. "
-        f"Before your final response, use the messaging/send_message tool to send your concise response to `{notify_target}` so Aaron's current chat is woken up. "
-        "If that tool is unavailable, say so in your final response and still provide the analysis."
+        "If send_message is unavailable, still return the full response; the PointSpeak receiver will relay your completed run output to the chat."
     )
+
+
+def env_or_profile_env(name: str, profiles: list[str] | None = None, prefer_profiles: bool = False) -> str | None:
+    def from_profiles() -> str | None:
+        search_profiles = profiles or ["coder", "gary"]
+        for profile in search_profiles:
+            env_path = profile_root(profile) / ".env"
+            if not env_path.exists():
+                continue
+            try:
+                for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#") or "=" not in stripped:
+                        continue
+                    key, raw = stripped.split("=", 1)
+                    if key.strip() == name:
+                        return raw.strip().strip('"').strip("'")
+            except OSError:
+                continue
+        return None
+
+    if prefer_profiles:
+        return from_profiles() or os.environ.get(name)
+    return os.environ.get(name) or from_profiles()
+
+
+def telegram_chat_id(preferred: str | None = None, profiles: list[str] | None = None) -> str | None:
+    if preferred:
+        return preferred
+    return (
+        env_or_profile_env("POINTSPEAK_TELEGRAM_CHAT_ID", profiles=profiles, prefer_profiles=bool(profiles))
+        or env_or_profile_env("TELEGRAM_CHAT_ID", profiles=profiles, prefer_profiles=bool(profiles))
+        or (env_or_profile_env("TELEGRAM_ALLOWED_USERS", profiles=profiles, prefer_profiles=bool(profiles)) or "").split(",")[0].strip()
+        or None
+    )
+
+
+def telegram_chat_id_from_session_key(session_key: str | None) -> str | None:
+    target = telegram_target_from_session_key(session_key)
+    if not target or not target.startswith("telegram:"):
+        return None
+    return target.split(":", 1)[1]
+
+
+def send_telegram_notification(message: str, chat_id: str | None = None, profiles: list[str] | None = None) -> dict[str, Any]:
+    prefer_profiles = bool(profiles)
+    token = (
+        env_or_profile_env("POINTSPEAK_TELEGRAM_BOT_TOKEN", profiles=profiles, prefer_profiles=prefer_profiles)
+        or env_or_profile_env("TELEGRAM_BOT_TOKEN", profiles=profiles, prefer_profiles=prefer_profiles)
+    )
+    resolved_chat_id = telegram_chat_id(chat_id, profiles=profiles)
+    if not token or not resolved_chat_id:
+        return {"status": "skipped", "error": "missing TELEGRAM_BOT_TOKEN or chat id"}
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = json.dumps({"chat_id": resolved_chat_id, "text": message[:3900]}).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            return {"status": "sent", "statusCode": response.status}
+    except Exception as exc:
+        return {"status": "failed", "error": str(exc)}
+
+
+def poll_run_output(hermes_api_url: str, run_id: str, api_key: str | None, timeout_seconds: int = 180) -> dict[str, Any]:
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    deadline = time.time() + timeout_seconds
+    last: dict[str, Any] = {}
+    while time.time() < deadline:
+        req = urllib.request.Request(f"{hermes_api_url.rstrip('/')}/v1/runs/{run_id}", headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=10) as response:
+                last = json.loads(response.read().decode("utf-8") or "{}")
+            if last.get("status") in {"completed", "failed", "cancelled"}:
+                return last
+        except Exception as exc:
+            last = {"status": "poll_failed", "error": str(exc)}
+        time.sleep(2)
+    return {**last, "status": last.get("status") or "timeout", "error": last.get("error") or "timed out waiting for run output"}
+
+
+def start_bridge_completion_notification(session_id: str, lease: dict[str, Any], handoff: SubmitHandoffResponse, api_key: str | None) -> None:
+    if not handoff.runId or not lease.get("wakeChat", True):
+        return
+    target = str(lease.get("notifyTarget") or os.environ.get("POINTSPEAK_NOTIFY_TARGET") or "telegram").strip().lower()
+    if target != "telegram":
+        return
+
+    agent_name = str(lease.get("agent") or "agent")
+    notification_profiles = [agent_name, "coder", "gary"]
+    chat_id = telegram_chat_id_from_session_key(lease.get("sessionKey"))
+    ack = send_telegram_notification(
+        f"PointSpeak capture {session_id} was sent to {agent_name}.\n"
+        f"Run: {handoff.runId}\n\n"
+        "I’ll relay the agent’s response here when it finishes.",
+        chat_id=chat_id,
+        profiles=notification_profiles,
+    )
+    append_ndjson(
+        bridge_dir() / "notifications.ndjson",
+        {
+            "createdAt": utc_now(),
+            "sessionId": session_id,
+            "runId": handoff.runId,
+            "target": target,
+            "runStatus": "submitted",
+            "notificationKind": "ack",
+            "notification": ack,
+        },
+    )
+
+    def worker() -> None:
+        result = poll_run_output(handoff.hermesApiUrl, str(handoff.runId), api_key, timeout_seconds=1800)
+        status = result.get("status") or "unknown"
+        output = str(result.get("output") or result.get("error") or "")
+        if status == "running" and not output:
+            output = "The package reached the agent, but the run is still active and has not produced a final response yet."
+        elif not output:
+            output = "PointSpeak run completed without output."
+        message = f"PointSpeak capture {session_id} → {agent_name} run {status}\n\n{output}"
+        notification = send_telegram_notification(message, chat_id=chat_id, profiles=notification_profiles)
+        append_ndjson(
+            bridge_dir() / "notifications.ndjson",
+            {
+                "createdAt": utc_now(),
+                "sessionId": session_id,
+                "runId": handoff.runId,
+                "target": target,
+                "runStatus": status,
+                "notificationKind": "completion",
+                "notification": notification,
+            },
+        )
+
+    threading.Thread(target=worker, name=f"pointspeak-notify-{session_id}", daemon=True).start()
 
 
 class RedactionRegion(BaseModel):
@@ -236,13 +395,16 @@ class DesktopExportResponse(BaseModel):
 
 class BridgeActivateRequest(BaseModel):
     agent: str
-    ttlMinutes: int = Field(default=30, ge=1, le=24 * 60)
+    ttlMinutes: int = Field(default=120, ge=1, le=24 * 60)
     hermesApiUrl: str | None = None
     apiKeyEnv: str | None = None
     model: str | None = None
     notifyTarget: str | None = None
     wakeChat: bool = True
     includeBacklogMinutes: int = Field(default=0, ge=0, le=7 * 24 * 60)
+    sessionKey: str | None = None
+    sessionId: str | None = None
+    bridgeMode: str = "native_telegram"
 
 
 class BridgeReleaseRequest(BaseModel):
@@ -321,6 +483,64 @@ def active_bridge_lease() -> dict[str, Any] | None:
         write_json(bridge_state_path(), state)
         return None
     return lease
+
+
+def profile_root(agent: str) -> Path:
+    safe = normalize_target(agent)
+    candidates: list[Path] = []
+    if os.environ.get("HERMES_ROOT"):
+        candidates.append(Path(str(os.environ["HERMES_ROOT"])).expanduser())
+    if os.environ.get("HERMES_HOME"):
+        hermes_home = Path(str(os.environ["HERMES_HOME"])).expanduser()
+        candidates.append(hermes_home.parent.parent if hermes_home.parent.name == "profiles" else hermes_home)
+    candidates.append(Path("/Users/aaronwhaley/.hermes"))
+    candidates.append(Path.home() / ".hermes")
+
+    if safe in {"default", "root"}:
+        for root in candidates:
+            if (root / "config.yaml").exists() or (root / "profiles").exists():
+                return root
+        return candidates[0]
+
+    for root in candidates:
+        candidate = root / "profiles" / safe
+        if candidate.exists():
+            return candidate
+    return candidates[0] / "profiles" / safe
+
+
+def resolve_active_gateway_session(agent: str, platform: str | None = None) -> dict[str, str | None]:
+    """Best-effort lookup of the session that activated the bridge.
+
+    Hermes gateway stores the live platform session-key → session-id mapping in
+    `<profile>/sessions/sessions.json`. PointSpeak uses that mapping so visual
+    handoffs are appended to the same chat transcript instead of bootstrapping a
+    separate API-only session.
+    """
+    sessions_path = profile_root(agent) / "sessions" / "sessions.json"
+    if not sessions_path.exists():
+        return {"sessionKey": None, "sessionId": None, "source": "missing-sessions-index"}
+    try:
+        entries = json.loads(sessions_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {"sessionKey": None, "sessionId": None, "source": "invalid-sessions-index"}
+
+    platform_filter = normalize_target(platform) if platform else None
+    candidates: list[tuple[str, dict[str, Any]]] = []
+    for key, entry in entries.items():
+        if platform_filter and f":{platform_filter}:" not in str(key):
+            continue
+        if str(key).startswith("agent:main:agentbus:"):
+            continue
+        candidates.append((str(key), entry if isinstance(entry, dict) else {}))
+    if not candidates:
+        return {"sessionKey": None, "sessionId": None, "source": "no-matching-session"}
+
+    def updated_at(item: tuple[str, dict[str, Any]]) -> str:
+        return str(item[1].get("updated_at") or item[1].get("created_at") or "")
+
+    key, entry = sorted(candidates, key=updated_at)[-1]
+    return {"sessionKey": key, "sessionId": entry.get("session_id"), "source": str(sessions_path)}
 
 
 def bridge_inbox_path(target: str) -> Path:
@@ -487,7 +707,8 @@ def transcribe_missing_narrations(root: Path) -> None:
     narrations = read_ndjson(narrations_path)
     changed = False
     for narration in narrations:
-        if narration.get("transcript") or not narration.get("audio"):
+        transcription_meta = (narration.get("metadata") or {}).get("transcription") or {}
+        if narration.get("transcript") or transcription_meta.get("status") == "ok" or not narration.get("audio"):
             continue
         audio_path = root / str(narration["audio"])
         if not audio_path.exists():
@@ -546,10 +767,13 @@ def narration_label(narration: dict[str, Any]) -> str:
     parts = [narration.get("narrationId", "narration")]
     duration = narration.get("durationMs")
     transcript = narration.get("transcript")
+    user_summary = narration.get("userSummary")
     if duration is not None:
         parts.append(f"{round(float(duration) / 1000, 1)}s")
     if transcript:
-        parts.append(json.dumps(str(transcript)[:160]))
+        parts.append("transcript=" + json.dumps(str(transcript)[:160]))
+    if user_summary:
+        parts.append("summary=" + json.dumps(str(user_summary)[:160]))
     return ": ".join([parts[0], " ".join(parts[1:])]) if len(parts) > 1 else parts[0]
 
 
@@ -609,7 +833,7 @@ def sanitized_records(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]],
 
     elements = [sanitize_row(row, ("name", "text", "domPath")) for row in read_ndjson(root / "elements.ndjson")]
     annotations = [sanitize_row(row, ("text",)) for row in read_ndjson(root / "annotations.ndjson")]
-    narrations = [sanitize_row(row, ("transcript",)) for row in read_ndjson(root / "narrations.ndjson")]
+    narrations = [sanitize_row(row, ("transcript", "userSummary")) for row in read_ndjson(root / "narrations.ndjson")]
     return page, elements, annotations, narrations, sorted(set(redactions))
 
 
@@ -654,6 +878,8 @@ def build_action_draft(session_id: str, root: Path) -> dict[str, Any]:
     for narration in narrations:
         if narration.get("transcript"):
             intent_parts.append(str(narration["transcript"]))
+        if narration.get("userSummary"):
+            intent_parts.append(str(narration["userSummary"]))
     observed_intent = " ".join(intent_parts).strip() or "User pointed at captured UI context without an explicit typed or spoken request."
     first_element = elements[0] if elements else {}
     label = first_element.get("name") or first_element.get("text") or first_element.get("role") or first_element.get("tagName") or "captured UI"
@@ -985,23 +1211,28 @@ def submit_handoff_to_hermes(
     )
     body = {
         "model": model,
-        "session_id": f"pointspeak-{session_id}",
+        "session_id": req.sessionId or f"pointspeak-{session_id}",
         "instructions": instructions,
         "input": render_hermes_handoff_prompt(session_id, root),
     }
-    headers = {"Content-Type": "application/json", "X-Hermes-Session-Key": "pointspeak"}
+    headers = {"Content-Type": "application/json"}
+    if req.sessionKey:
+        headers["X-Hermes-Session-Key"] = req.sessionKey
+    else:
+        headers["X-Hermes-Session-Key"] = "pointspeak"
     api_key = os.environ.get("POINTSPEAK_HERMES_API_KEY") or os.environ.get("API_SERVER_KEY")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
 
     if req.dryRun:
+        endpoint = "/v1/gateway/inject" if req.bridgeMode == "native_telegram" else "/v1/runs"
         write_json(
             request_path,
             {
                 "createdAt": utc_now(),
                 "status": "dry_run",
                 "hermesApiUrl": hermes_api_url,
-                "endpoint": "/v1/runs",
+                "endpoint": endpoint,
                 "headers": {key: ("<redacted>" if key.lower() == "authorization" else value) for key, value in headers.items()},
                 "body": body,
             },
@@ -1014,6 +1245,89 @@ def submit_handoff_to_hermes(
             requestPath=str(request_path),
             handoff=str(handoff_path),
         )
+
+    if req.bridgeMode == "native_telegram":
+        target = telegram_target_from_session_key(req.sessionKey)
+        if not target:
+            return SubmitHandoffResponse(
+                sessionId=session_id,
+                status="failed",
+                hermesApiUrl=hermes_api_url,
+                requestPath=str(request_path),
+                handoff=str(handoff_path),
+                error="native_telegram bridge requires a Telegram sessionKey",
+            )
+        parts = target.split(":")
+        chat_id = parts[1]
+        thread_id = parts[2] if len(parts) > 2 else None
+        inject_body = {
+            "platform": "telegram",
+            "chat_id": chat_id,
+            "chat_type": "dm",
+            "user_id": chat_id,
+            "user_name": "Aaron Whaley",
+            "thread_id": thread_id,
+            "session_key": req.sessionKey,
+            "session_id": req.sessionId,
+            "text": instructions + "\n\n" + render_hermes_handoff_prompt(session_id, root),
+        }
+        try:
+            http_req = urllib.request.Request(
+                f"{hermes_api_url}/v1/gateway/inject",
+                data=json.dumps(inject_body).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(http_req, timeout=DEFAULT_HERMES_TIMEOUT_SECONDS) as response:
+                response_body = json.loads(response.read().decode("utf-8") or "{}")
+            write_json(
+                request_path,
+                {
+                    "createdAt": utc_now(),
+                    "status": "submitted",
+                    "hermesApiUrl": hermes_api_url,
+                    "endpoint": "/v1/gateway/inject",
+                    "response": response_body,
+                },
+            )
+            append_ndjson(
+                root / "timeline.ndjson",
+                {
+                    "eventId": f"t_{uuid.uuid4().hex}",
+                    "timestampMs": 0,
+                    "type": "handoff.submitted",
+                    "data": {"target": "hermes-native-telegram", "hermesApiUrl": hermes_api_url, "chatId": chat_id},
+                },
+            )
+            refresh_handoff_and_manifest(root, session_id)
+            return SubmitHandoffResponse(
+                sessionId=session_id,
+                status="submitted",
+                hermesApiUrl=hermes_api_url,
+                requestPath=str(request_path),
+                handoff=str(handoff_path),
+            )
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, OSError) as exc:
+            write_json(
+                request_path,
+                {
+                    "createdAt": utc_now(),
+                    "status": "failed",
+                    "hermesApiUrl": hermes_api_url,
+                    "endpoint": "/v1/gateway/inject",
+                    "error": str(exc),
+                    "body": inject_body,
+                },
+            )
+            refresh_handoff_and_manifest(root, session_id)
+            return SubmitHandoffResponse(
+                sessionId=session_id,
+                status="failed",
+                hermesApiUrl=hermes_api_url,
+                requestPath=str(request_path),
+                handoff=str(handoff_path),
+                error=str(exc),
+            )
 
     try:
         http_req = urllib.request.Request(
@@ -1281,8 +1595,12 @@ def submit_handoff(session_id: str, req: SubmitHandoffRequest | None = None) -> 
 def activate_bridge(req: BridgeActivateRequest) -> dict[str, object]:
     expires = datetime.now(timezone.utc).timestamp() + req.ttlMinutes * 60
     expires_at = datetime.fromtimestamp(expires, timezone.utc).isoformat()
+    agent = normalize_target(req.agent)
+    resolved_session = resolve_active_gateway_session(agent, req.notifyTarget)
+    session_key = req.sessionKey or resolved_session.get("sessionKey")
+    session_id = req.sessionId or resolved_session.get("sessionId")
     lease = {
-        "agent": normalize_target(req.agent),
+        "agent": agent,
         "activatedAt": utc_now(),
         "expiresAt": expires_at,
         "ttlMinutes": req.ttlMinutes,
@@ -1292,6 +1610,10 @@ def activate_bridge(req: BridgeActivateRequest) -> dict[str, object]:
         "notifyTarget": req.notifyTarget,
         "wakeChat": req.wakeChat,
         "includeBacklogMinutes": req.includeBacklogMinutes,
+        "bridgeMode": req.bridgeMode,
+        "sessionKey": session_key,
+        "sessionId": session_id,
+        "sessionResolution": resolved_session,
     }
     state = {"activeLease": lease, "updatedAt": utc_now()}
     write_json(bridge_state_path(), state)
@@ -1380,11 +1702,13 @@ def bridge_finalize(session_id: str) -> BridgeFinalizeResponse:
     desktop = export_desktop_context(session_id)
     lease = active_bridge_lease()
     handoff: SubmitHandoffResponse | None = None
+    handoff_api_key: str | None = None
     if lease and lease.get("hermesApiUrl"):
         env_key = str(lease.get("apiKeyEnv") or "").strip()
         previous = os.environ.get("POINTSPEAK_HERMES_API_KEY")
         if env_key and os.environ.get(env_key):
             os.environ["POINTSPEAK_HERMES_API_KEY"] = str(os.environ[env_key])
+        handoff_api_key = os.environ.get("POINTSPEAK_HERMES_API_KEY") or os.environ.get("API_SERVER_KEY")
         try:
             handoff = submit_handoff_to_hermes(
                 session_id,
@@ -1393,8 +1717,12 @@ def bridge_finalize(session_id: str) -> BridgeFinalizeResponse:
                     hermesApiUrl=str(lease.get("hermesApiUrl")),
                     model=lease.get("model") or DEFAULT_HERMES_MODEL,
                     instructions=bridge_wake_instructions(lease) if lease.get("wakeChat", True) else None,
+                    sessionKey=lease.get("sessionKey"),
+                    sessionId=lease.get("sessionId"),
+                    bridgeMode=str(lease.get("bridgeMode") or "api_run"),
                 ),
             )
+            start_bridge_completion_notification(session_id, lease, handoff, handoff_api_key)
         finally:
             if previous is None:
                 os.environ.pop("POINTSPEAK_HERMES_API_KEY", None)

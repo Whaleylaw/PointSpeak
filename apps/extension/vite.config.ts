@@ -15,7 +15,8 @@ export default defineConfig({
         background: resolve(rootDir, "src/background.ts"),
         content: resolve(rootDir, "src/content.ts"),
         sidepanel: resolve(rootDir, "src/sidepanel/index.html"),
-      },
+        recorder: resolve(rootDir, "src/recorder/index.html"),
+      }, 
       output: {
         entryFileNames: "[name].js",
         chunkFileNames: "chunks/[name]-[hash].js",

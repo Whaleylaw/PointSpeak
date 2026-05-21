@@ -1,0 +1,50 @@
+body {
+  margin: 0;
+  background: #111827;
+  color: #f9fafb;
+  font: 14px system-ui, sans-serif;
+}
+
+main {
+  box-sizing: border-box;
+  min-width: 360px;
+  padding: 18px;
+}
+
+h1 {
+  font-size: 18px;
+  margin: 0 0 8px;
+}
+
+p {
+  line-height: 1.4;
+}
+
+.controls {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+button {
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  font: 13px system-ui, sans-serif;
+  padding: 9px 13px;
+}
+
+#record {
+  background: #ef4444;
+  color: white;
+}
+
+#skip {
+  background: #374151;
+  color: white;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}

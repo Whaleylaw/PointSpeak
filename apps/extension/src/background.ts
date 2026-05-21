@@ -158,6 +158,31 @@ async function askForAnotherPoint(tabId: number, sessionId: string): Promise<boo
   return false;
 }
 
+async function openRecorderWindow(sessionId: string, elementRef?: string, annotationId?: string): Promise<void> {
+  const params = new URLSearchParams({ sessionId });
+  if (elementRef) params.set("elementRef", elementRef);
+  if (annotationId) params.set("annotationId", annotationId);
+
+  const activeWindow = await chrome.windows.getCurrent().catch(() => undefined);
+  const screenWidth = activeWindow?.width ?? 1440;
+  const screenLeft = activeWindow?.left ?? 0;
+  const screenTop = activeWindow?.top ?? 0;
+  const width = 420;
+  const height = 280;
+  const left = Math.max(screenLeft, screenLeft + screenWidth - width - 24);
+  const top = Math.max(screenTop + 48, screenTop + 24);
+
+  await chrome.windows.create({
+    url: chrome.runtime.getURL(`src/recorder/index.html?${params.toString()}`),
+    type: "popup",
+    width,
+    height,
+    left,
+    top,
+    focused: true,
+  });
+}
+
 async function postPickedElement(sessionId: string, element: unknown): Promise<AddElementResponse> {
   const response = await fetch(`${RECEIVER_URL}/sessions/${sessionId}/elements`, {
     method: "POST",
@@ -339,6 +364,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
 
+
+  if (message?.type === "POINTSPEAK_OPEN_RECORDER" && typeof message.sessionId === "string") {
+    openRecorderWindow(message.sessionId, message.elementRef, message.annotationId)
+      .then(() => sendResponse({ ok: true }))
+      .catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : String(error) }));
+    return true;
+  }
 
   if (message?.type === "POINTSPEAK_NARRATION_CAPTURED" && typeof message.sessionId === "string") {
     postNarration(message.sessionId, message.narration)

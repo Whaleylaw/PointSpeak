@@ -71,6 +71,7 @@ export const NarrationSchema = z.object({
   timestampMs: z.number().nonnegative(),
   durationMs: z.number().nonnegative().optional(),
   transcript: z.string().optional(),
+  userSummary: z.string().optional(),
   audio: z.string().optional(),
   mimeType: z.string().default("audio/webm"),
   targetElementRefs: z.array(z.string()).default([]),
@@ -126,6 +127,7 @@ export const BridgeLeaseSchema = z.object({
   notifyTarget: z.string().optional().nullable(),
   wakeChat: z.boolean().default(true),
   includeBacklogMinutes: z.number().int().nonnegative().default(0),
+  bridgeMode: z.enum(["api_run", "native_telegram"]).default("native_telegram"),
 });
 
 export const BridgeEventSchema = z.object({
