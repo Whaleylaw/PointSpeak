@@ -500,7 +500,13 @@ def redact_text(value: str | None, privacy: dict[str, Any]) -> tuple[str | None,
     if controls.get("redactCreditCards", True):
         patterns.append(("credit-card", r"(?<!\d)(?:\d[ -]*?){13,19}(?!\d)", "[redacted-card]"))
     if controls.get("redactSecrets", True):
-        patterns.append(("secret", r"\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+", "[redacted-secret]"))
+        patterns.extend(
+            [
+                ("secret", r"\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+", "[redacted-secret]"),
+                ("secret-query", r"([?&](?:access_)?token=)[^\s&#]+", r"\1[redacted-secret]"),
+                ("jwt", r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b", "[redacted-jwt]"),
+            ]
+        )
     for label, pattern, replacement in patterns:
         text, count = re.subn(pattern, replacement, text, flags=re.IGNORECASE)
         if count:
