@@ -91,6 +91,18 @@ Multi-capture sessions append repeated point groups to the same bundle:
 - The receiver groups elements, annotations, and narrations into `capturePoints`.
 - `GET /sessions/{session_id}/capture-points` exposes the grouped view used by Hermes intake and desktop export.
 
+## Milestone 11 Implementation
+
+The bridge router decouples capture from live agent delivery:
+
+- Captures finalized by the extension call `POST /sessions/{session_id}/bridge-finalize`.
+- Finalization always refreshes intake, replay, desktop export, and a bridge event.
+- `POST /bridge/activate` creates a temporary active-agent lease with optional Hermes API URL, API-key env var, model name, and backlog window.
+- When a lease is active, new captures target that agent and the receiver attempts delivery to the configured Hermes API server.
+- When no lease is active, new captures are queued to `unclaimed` and can be claimed later.
+- Bridge history is append-only (`events.ndjson` plus per-target inbox files), so captures remain durable even if agents are offline or auth fails.
+- Extension badges now distinguish local success from delivery: `QUEUE` means saved locally and queued; `SENT` means delivered to a live agent.
+
 ## Design Principles
 
 - Screenshot is the visual source of truth.

@@ -23,6 +23,7 @@ DEFAULT_HERMES_API_URL = os.environ.get("POINTSPEAK_HERMES_API_URL", "http://127
 DEFAULT_HERMES_MODEL = os.environ.get("POINTSPEAK_HERMES_MODEL", "hermes-agent")
 DEFAULT_HERMES_TIMEOUT_SECONDS = float(os.environ.get("POINTSPEAK_HERMES_TIMEOUT_SECONDS", "3"))
 DEFAULT_DESKTOP_INBOX = Path(os.environ.get("POINTSPEAK_DESKTOP_INBOX", Path.home() / "Github" / "RoscoeDesktop" / ".pointspeak-inbox"))
+DEFAULT_BRIDGE_ROOT = Path(os.environ.get("POINTSPEAK_BRIDGE_ROOT", DEFAULT_STORAGE_ROOT.parent / "bridge"))
 
 app = FastAPI(title="PointSpeak Receiver", version="0.1.0")
 app.add_middleware(
@@ -218,6 +219,166 @@ class DesktopExportResponse(BaseModel):
     sessionId: str
     exportPath: str
     desktopInbox: str
+
+
+class BridgeActivateRequest(BaseModel):
+    agent: str
+    ttlMinutes: int = Field(default=30, ge=1, le=24 * 60)
+    hermesApiUrl: str | None = None
+    apiKeyEnv: str | None = None
+    model: str | None = None
+    includeBacklogMinutes: int = Field(default=0, ge=0, le=7 * 24 * 60)
+
+
+class BridgeReleaseRequest(BaseModel):
+    agent: str | None = None
+
+
+class BridgeQueueRequest(BaseModel):
+    sessionId: str
+    target: str | None = None
+    status: Literal["queued", "delivered", "failed"] = "queued"
+
+
+class BridgeEventResponse(BaseModel):
+    eventId: str
+    sessionId: str
+    bundlePath: str
+    target: str
+    status: str
+    activeAgent: str | None = None
+    deliveryStatus: str | None = None
+    deliveryError: str | None = None
+
+
+class BridgeFinalizeResponse(BaseModel):
+    sessionId: str
+    bridge: BridgeEventResponse
+    intake: IntakeResponse
+    desktop: DesktopExportResponse
+    handoff: SubmitHandoffResponse | None = None
+
+
+def parse_utc(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def bridge_dir() -> Path:
+    DEFAULT_BRIDGE_ROOT.mkdir(parents=True, exist_ok=True)
+    (DEFAULT_BRIDGE_ROOT / "inbox").mkdir(parents=True, exist_ok=True)
+    return DEFAULT_BRIDGE_ROOT
+
+
+def bridge_state_path() -> Path:
+    return bridge_dir() / "state.json"
+
+
+def bridge_events_path() -> Path:
+    return bridge_dir() / "events.ndjson"
+
+
+def normalize_target(value: str | None) -> str:
+    target = (value or "unclaimed").strip().lower().replace(" ", "-")
+    return "".join(ch for ch in target if ch.isalnum() or ch in {"-", "_"}) or "unclaimed"
+
+
+def load_bridge_state() -> dict[str, Any]:
+    path = bridge_state_path()
+    if not path.exists():
+        return {"activeLease": None, "updatedAt": utc_now()}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def active_bridge_lease() -> dict[str, Any] | None:
+    state = load_bridge_state()
+    lease = state.get("activeLease")
+    if not lease:
+        return None
+    expires = parse_utc(lease.get("expiresAt"))
+    if not expires or expires <= datetime.now(timezone.utc):
+        state["activeLease"] = None
+        state["updatedAt"] = utc_now()
+        write_json(bridge_state_path(), state)
+        return None
+    return lease
+
+
+def bridge_inbox_path(target: str) -> Path:
+    return bridge_dir() / "inbox" / f"{normalize_target(target)}.ndjson"
+
+
+def read_bridge_events(target: str | None = None, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+    rows = read_ndjson(bridge_events_path())
+    if target:
+        rows = [row for row in rows if row.get("target") == normalize_target(target)]
+    if status:
+        rows = [row for row in rows if row.get("status") == status]
+    return rows[-limit:]
+
+
+def append_bridge_event(event: dict[str, Any]) -> None:
+    append_ndjson(bridge_events_path(), event)
+    append_ndjson(bridge_inbox_path(str(event.get("target") or "unclaimed")), event)
+
+
+def build_bridge_event(session_id: str, root: Path, target: str, status: str = "queued", delivery: SubmitHandoffResponse | None = None) -> dict[str, Any]:
+    intake_path = root / "handoff" / "intake.json"
+    action_path = root / "handoff" / "action-draft.md"
+    replay_path = root / "replay" / "index.html"
+    return {
+        "eventId": f"evt_{uuid.uuid4().hex}",
+        "createdAt": utc_now(),
+        "sessionId": session_id,
+        "bundlePath": str(root),
+        "target": normalize_target(target),
+        "status": status,
+        "claimedBy": None,
+        "claimedAt": None,
+        "artifacts": {
+            "intake": str(intake_path),
+            "actionDraft": str(action_path),
+            "replay": str(replay_path),
+            "handoff": str(root / "handoff" / "latest.md"),
+        },
+        "delivery": delivery.model_dump(mode="json") if delivery else None,
+    }
+
+
+def queue_bridge_session(session_id: str, root: Path, target: str | None = None, delivery: SubmitHandoffResponse | None = None) -> dict[str, Any]:
+    lease = active_bridge_lease()
+    chosen_target = normalize_target(target or (lease or {}).get("agent") or "unclaimed")
+    status = "delivered" if delivery and delivery.status == "submitted" else "queued"
+    event = build_bridge_event(session_id, root, chosen_target, status=status, delivery=delivery)
+    append_bridge_event(event)
+    append_ndjson(
+        root / "timeline.ndjson",
+        {
+            "eventId": f"t_{uuid.uuid4().hex}",
+            "timestampMs": 0,
+            "type": "bridge.queued" if status == "queued" else "bridge.delivered",
+            "data": {"bridgeEventId": event["eventId"], "target": chosen_target, "status": status},
+        },
+    )
+    return event
+
+
+def bridge_response_from_event(event: dict[str, Any], lease: dict[str, Any] | None = None) -> BridgeEventResponse:
+    delivery = event.get("delivery") or {}
+    return BridgeEventResponse(
+        eventId=str(event.get("eventId")),
+        sessionId=str(event.get("sessionId")),
+        bundlePath=str(event.get("bundlePath")),
+        target=str(event.get("target")),
+        status=str(event.get("status")),
+        activeAgent=(lease or {}).get("agent") if lease else None,
+        deliveryStatus=delivery.get("status"),
+        deliveryError=delivery.get("error"),
+    )
 
 
 def utc_now() -> str:
@@ -1029,6 +1190,131 @@ def submit_handoff(session_id: str, req: SubmitHandoffRequest | None = None) -> 
     root = require_session_root(session_id)
     refresh_handoff_and_manifest(root, session_id)
     return submit_handoff_to_hermes(session_id, root, req or SubmitHandoffRequest())
+
+
+@app.post("/bridge/activate")
+def activate_bridge(req: BridgeActivateRequest) -> dict[str, object]:
+    expires = datetime.now(timezone.utc).timestamp() + req.ttlMinutes * 60
+    expires_at = datetime.fromtimestamp(expires, timezone.utc).isoformat()
+    lease = {
+        "agent": normalize_target(req.agent),
+        "activatedAt": utc_now(),
+        "expiresAt": expires_at,
+        "ttlMinutes": req.ttlMinutes,
+        "hermesApiUrl": req.hermesApiUrl,
+        "apiKeyEnv": req.apiKeyEnv,
+        "model": req.model,
+        "includeBacklogMinutes": req.includeBacklogMinutes,
+    }
+    state = {"activeLease": lease, "updatedAt": utc_now()}
+    write_json(bridge_state_path(), state)
+    backlog: list[dict[str, Any]] = []
+    if req.includeBacklogMinutes:
+        cutoff = datetime.now(timezone.utc).timestamp() - req.includeBacklogMinutes * 60
+        for event in read_bridge_events(target="unclaimed", status="queued", limit=500):
+            created = parse_utc(event.get("createdAt"))
+            if created and created.timestamp() >= cutoff:
+                backlog.append(event)
+    return {"activeLease": lease, "backlog": backlog, "bridgeRoot": str(bridge_dir())}
+
+
+@app.post("/bridge/release")
+def release_bridge(req: BridgeReleaseRequest | None = None) -> dict[str, object]:
+    state = load_bridge_state()
+    lease = active_bridge_lease()
+    if req and req.agent and lease and lease.get("agent") != normalize_target(req.agent):
+        return {"released": False, "activeLease": lease}
+    state["activeLease"] = None
+    state["updatedAt"] = utc_now()
+    write_json(bridge_state_path(), state)
+    return {"released": True, "activeLease": None}
+
+
+@app.get("/bridge/status")
+def bridge_status() -> dict[str, object]:
+    lease = active_bridge_lease()
+    return {
+        "activeLease": lease,
+        "bridgeRoot": str(bridge_dir()),
+        "recent": read_bridge_events(limit=10),
+        "queued": {
+            "unclaimed": len(read_bridge_events(target="unclaimed", status="queued", limit=1000)),
+            **({lease["agent"]: len(read_bridge_events(target=lease["agent"], status="queued", limit=1000))} if lease else {}),
+        },
+    }
+
+
+@app.get("/bridge/inbox")
+def bridge_inbox(target: str | None = None, status: str | None = "queued", limit: int = 50) -> dict[str, object]:
+    return {"target": normalize_target(target), "events": read_bridge_events(target=target, status=status, limit=limit)}
+
+
+@app.post("/bridge/queue", response_model=BridgeEventResponse)
+def bridge_queue(req: BridgeQueueRequest) -> BridgeEventResponse:
+    root = require_session_root(req.sessionId)
+    refresh_handoff_and_manifest(root, req.sessionId)
+    event = queue_bridge_session(req.sessionId, root, req.target)
+    refresh_handoff_and_manifest(root, req.sessionId)
+    return bridge_response_from_event(event, active_bridge_lease())
+
+
+@app.post("/bridge/claim")
+def bridge_claim(target: str, agent: str | None = None, limit: int = 10) -> dict[str, object]:
+    # Append-only claim log: return matching events and record claim events without mutating historical rows.
+    claimant = normalize_target(agent or target)
+    events = read_bridge_events(target=target, status="queued", limit=limit)
+    claimed = []
+    for event in events:
+        claim = dict(event)
+        claim["eventId"] = f"evt_{uuid.uuid4().hex}"
+        claim["createdAt"] = utc_now()
+        claim["status"] = "claimed"
+        claim["claimedBy"] = claimant
+        claim["claimedAt"] = utc_now()
+        append_bridge_event(claim)
+        claimed.append(claim)
+    return {"claimedBy": claimant, "events": claimed}
+
+
+@app.post("/sessions/{session_id}/bridge-finalize", response_model=BridgeFinalizeResponse)
+def bridge_finalize(session_id: str) -> BridgeFinalizeResponse:
+    root = require_session_root(session_id)
+    refresh_handoff_and_manifest(root, session_id)
+    intake_data = write_intake_artifacts(session_id, root)
+    intake = IntakeResponse(
+        sessionId=session_id,
+        intakePath=str(root / "handoff" / "intake.json"),
+        actionDraftPath=str(root / "handoff" / "action-draft.md"),
+        replayPath=str(root / "replay" / "index.html"),
+        summary=str(intake_data.get("summary", "")),
+        suggestedActions=list(intake_data.get("suggestedActions") or []),
+        redactionsApplied=list(intake_data.get("redactionsApplied") or []),
+    )
+    desktop = export_desktop_context(session_id)
+    lease = active_bridge_lease()
+    handoff: SubmitHandoffResponse | None = None
+    if lease and lease.get("hermesApiUrl"):
+        env_key = str(lease.get("apiKeyEnv") or "").strip()
+        previous = os.environ.get("POINTSPEAK_HERMES_API_KEY")
+        if env_key and os.environ.get(env_key):
+            os.environ["POINTSPEAK_HERMES_API_KEY"] = str(os.environ[env_key])
+        try:
+            handoff = submit_handoff_to_hermes(
+                session_id,
+                root,
+                SubmitHandoffRequest(hermesApiUrl=str(lease.get("hermesApiUrl")), model=lease.get("model") or DEFAULT_HERMES_MODEL),
+            )
+        finally:
+            if previous is None:
+                os.environ.pop("POINTSPEAK_HERMES_API_KEY", None)
+            else:
+                os.environ["POINTSPEAK_HERMES_API_KEY"] = previous
+    else:
+        # Still write a dry-run request so the package is self-describing, but do not treat no live agent as an error.
+        handoff = submit_handoff_to_hermes(session_id, root, SubmitHandoffRequest(dryRun=True))
+    event = queue_bridge_session(session_id, root, delivery=handoff)
+    refresh_handoff_and_manifest(root, session_id)
+    return BridgeFinalizeResponse(sessionId=session_id, bridge=bridge_response_from_event(event, lease), intake=intake, desktop=desktop, handoff=handoff)
 
 
 @app.post("/sessions/{session_id}/privacy")

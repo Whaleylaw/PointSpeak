@@ -98,3 +98,44 @@ replay/index.html
 desktop/latest.json
 privacy-report.json
 ```
+
+
+## Milestone 11 — Bridge Router
+
+PointSpeak now treats local durable capture as success and agent delivery as an optional bridge. If no agent has activated the bridge, captures are queued locally instead of surfacing a scary delivery error.
+
+Bridge endpoints:
+
+```text
+POST /bridge/activate        # agent lease, e.g. coder for 30 minutes
+POST /bridge/release         # lower the active agent side of the bridge
+GET  /bridge/status          # active lease + recent events
+GET  /bridge/inbox           # queued events by target/status
+POST /bridge/claim           # append-only claim log for an agent
+POST /bridge/queue           # queue an existing session
+POST /sessions/<id>/bridge-finalize
+```
+
+Router files live under:
+
+```text
+~/.pointspeak/bridge/
+  state.json
+  events.ndjson
+  inbox/unclaimed.ndjson
+  inbox/<agent>.ndjson
+```
+
+A bridge activation can target a specific Hermes profile API server:
+
+```json
+{
+  "agent": "coder",
+  "ttlMinutes": 30,
+  "hermesApiUrl": "http://127.0.0.1:8642",
+  "apiKeyEnv": "POINTSPEAK_CODER_API_KEY",
+  "includeBacklogMinutes": 30
+}
+```
+
+If delivery fails or no lease is active, the extension displays `QUEUE`; the side panel shows the bridge event and any delivery warning.

@@ -115,6 +115,30 @@ export const AgentIntakeSchema = z.object({
   redactionsApplied: z.array(z.string()).default([]),
 });
 
+export const BridgeLeaseSchema = z.object({
+  agent: z.string(),
+  activatedAt: z.string(),
+  expiresAt: z.string(),
+  ttlMinutes: z.number().int().positive(),
+  hermesApiUrl: z.string().optional().nullable(),
+  apiKeyEnv: z.string().optional().nullable(),
+  model: z.string().optional().nullable(),
+  includeBacklogMinutes: z.number().int().nonnegative().default(0),
+});
+
+export const BridgeEventSchema = z.object({
+  eventId: z.string(),
+  createdAt: z.string(),
+  sessionId: z.string(),
+  bundlePath: z.string(),
+  target: z.string(),
+  status: z.enum(["queued", "delivered", "failed", "claimed"]),
+  claimedBy: z.string().optional().nullable(),
+  claimedAt: z.string().optional().nullable(),
+  artifacts: z.record(z.string()).default({}),
+  delivery: z.record(z.unknown()).optional().nullable(),
+});
+
 export const TimelineEventSchema = z.object({
   eventId: z.string(),
   timestampMs: z.number().nonnegative(),
@@ -155,5 +179,7 @@ export type RedactionRegion = z.infer<typeof RedactionRegionSchema>;
 export type PrivacyControls = z.infer<typeof PrivacyControlsSchema>;
 export type CapturePoint = z.infer<typeof CapturePointSchema>;
 export type AgentIntake = z.infer<typeof AgentIntakeSchema>;
+export type BridgeLease = z.infer<typeof BridgeLeaseSchema>;
+export type BridgeEvent = z.infer<typeof BridgeEventSchema>;
 export type TimelineEvent = z.infer<typeof TimelineEventSchema>;
 export type Manifest = z.infer<typeof ManifestSchema>;

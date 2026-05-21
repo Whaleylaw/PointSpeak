@@ -70,6 +70,25 @@ type DesktopExportResponse = {
   desktopInbox: string;
 };
 
+type BridgeEventResponse = {
+  eventId: string;
+  sessionId: string;
+  bundlePath: string;
+  target: string;
+  status: "queued" | "delivered" | "failed" | string;
+  activeAgent?: string;
+  deliveryStatus?: string;
+  deliveryError?: string;
+};
+
+type BridgeFinalizeResponse = {
+  sessionId: string;
+  bridge: BridgeEventResponse;
+  intake: IntakeResponse;
+  desktop: DesktopExportResponse;
+  handoff?: SubmitHandoffResponse;
+};
+
 async function setBadge(text: string, color: string): Promise<void> {
   await chrome.action.setBadgeText({ text });
   await chrome.action.setBadgeBackgroundColor({ color });
@@ -203,17 +222,26 @@ async function exportDesktop(sessionId: string): Promise<DesktopExportResponse> 
   return response.json() as Promise<DesktopExportResponse>;
 }
 
-async function finalizeSession(sessionId: string): Promise<{ intake: IntakeResponse; desktop: DesktopExportResponse; handoff: SubmitHandoffResponse }> {
-  const intake = await createIntake(sessionId);
-  const desktop = await exportDesktop(sessionId);
-  const handoff = await submitHandoff(sessionId);
+async function finalizeSession(sessionId: string): Promise<BridgeFinalizeResponse> {
+  const response = await fetch(`${RECEIVER_URL}/sessions/${sessionId}/bridge-finalize`, { method: "POST" });
+  if (!response.ok) throw new Error(`PointSpeak receiver rejected bridge finalize: ${await response.text()}`);
+  const finalized = (await response.json()) as BridgeFinalizeResponse;
   await chrome.storage.local.set({
-    lastPointSpeakIntake: intake,
-    lastPointSpeakDesktopExport: desktop,
-    lastPointSpeakHandoff: handoff,
-    lastPointSpeakError: handoff.error ?? null,
+    lastPointSpeakIntake: finalized.intake,
+    lastPointSpeakDesktopExport: finalized.desktop,
+    lastPointSpeakBridge: finalized.bridge,
+    lastPointSpeakHandoff: finalized.handoff ?? null,
+    lastPointSpeakWarning: finalized.bridge.deliveryError ?? finalized.handoff?.error ?? null,
+    lastPointSpeakError: null,
   });
-  return { intake, desktop, handoff };
+  return finalized;
+}
+
+function badgeForFinalized(finalized: BridgeFinalizeResponse): { text: string; color: string } {
+  if (finalized.bridge.status === "delivered" || finalized.handoff?.status === "submitted") {
+    return { text: "SENT", color: "#16a34a" };
+  }
+  return { text: "QUEUE", color: "#f97316" };
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -297,7 +325,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         await setBadge("SEND", "#2563eb");
         const finalized = await finalizeSession(message.sessionId);
-        await setBadge(finalized.handoff.status === "submitted" ? "SENT" : "SAVE", finalized.handoff.status === "submitted" ? "#16a34a" : "#f97316");
+        const badge = badgeForFinalized(finalized);
+        await setBadge(badge.text, badge.color);
         await clearBadgeSoon();
         sendResponse({ ok: true, result, ...finalized });
       })
@@ -317,7 +346,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await chrome.storage.local.set({ lastPointSpeakNarration: result, lastPointSpeakError: null });
         await setBadge("SEND", "#2563eb");
         const finalized = await finalizeSession(message.sessionId);
-        await setBadge(finalized.handoff.status === "submitted" ? "SENT" : "SAVE", finalized.handoff.status === "submitted" ? "#16a34a" : "#f97316");
+        const badge = badgeForFinalized(finalized);
+        await setBadge(badge.text, badge.color);
         await clearBadgeSoon();
         sendResponse({ ok: true, result, ...finalized });
       })
@@ -331,7 +361,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message?.type === "POINTSPEAK_NARRATION_SKIPPED" && typeof message.sessionId === "string") {
-    submitHandoff(message.sessionId)
+    Promise.resolve()
       .then(async () => {
         if (sender.tab?.id && await askForAnotherPoint(sender.tab.id, message.sessionId)) {
           sendResponse({ ok: true, continued: true });
@@ -339,7 +369,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         await setBadge("SEND", "#2563eb");
         const finalized = await finalizeSession(message.sessionId);
-        await setBadge(finalized.handoff.status === "submitted" ? "SENT" : "SAVE", finalized.handoff.status === "submitted" ? "#16a34a" : "#f97316");
+        const badge = badgeForFinalized(finalized);
+        await setBadge(badge.text, badge.color);
         await clearBadgeSoon();
         sendResponse({ ok: true, ...finalized });
       })

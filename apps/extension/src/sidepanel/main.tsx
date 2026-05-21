@@ -56,6 +56,17 @@ type LastDesktopExport = {
   desktopInbox: string;
 };
 
+type LastBridge = {
+  eventId: string;
+  sessionId: string;
+  bundlePath: string;
+  target: string;
+  status: string;
+  activeAgent?: string;
+  deliveryStatus?: string;
+  deliveryError?: string;
+};
+
 function App() {
   const [session, setSession] = useState<LastSession | null>(null);
   const [element, setElement] = useState<LastElement | null>(null);
@@ -64,6 +75,8 @@ function App() {
   const [handoff, setHandoff] = useState<LastHandoff | null>(null);
   const [intake, setIntake] = useState<LastIntake | null>(null);
   const [desktopExport, setDesktopExport] = useState<LastDesktopExport | null>(null);
+  const [bridge, setBridge] = useState<LastBridge | null>(null);
+  const [warning, setWarning] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -76,6 +89,8 @@ function App() {
         "lastPointSpeakHandoff",
         "lastPointSpeakIntake",
         "lastPointSpeakDesktopExport",
+        "lastPointSpeakBridge",
+        "lastPointSpeakWarning",
         "lastPointSpeakError",
       ])
       .then((value) => {
@@ -86,6 +101,8 @@ function App() {
         setHandoff((value.lastPointSpeakHandoff as LastHandoff | undefined) ?? null);
         setIntake((value.lastPointSpeakIntake as LastIntake | undefined) ?? null);
         setDesktopExport((value.lastPointSpeakDesktopExport as LastDesktopExport | undefined) ?? null);
+        setBridge((value.lastPointSpeakBridge as LastBridge | undefined) ?? null);
+        setWarning((value.lastPointSpeakWarning as string | undefined) ?? null);
         setError((value.lastPointSpeakError as string | undefined) ?? null);
       });
   }, []);
@@ -188,6 +205,37 @@ function App() {
             <dt>Redactions</dt>
             <dd><code>{intake.redactionsApplied.length ? intake.redactionsApplied.join(", ") : "none"}</code></dd>
           </dl>
+        </section>
+      ) : null}
+      {bridge ? (
+        <section>
+          <h2>PointSpeak Bridge</h2>
+          <dl>
+            <dt>Status</dt>
+            <dd><code>{bridge.status}</code></dd>
+            <dt>Target</dt>
+            <dd><code>{bridge.target}</code></dd>
+            <dt>Event</dt>
+            <dd><code>{bridge.eventId}</code></dd>
+            {bridge.activeAgent ? (
+              <>
+                <dt>Active Agent</dt>
+                <dd><code>{bridge.activeAgent}</code></dd>
+              </>
+            ) : null}
+            {bridge.deliveryStatus ? (
+              <>
+                <dt>Delivery</dt>
+                <dd><code>{bridge.deliveryStatus}</code></dd>
+              </>
+            ) : null}
+          </dl>
+        </section>
+      ) : null}
+      {warning ? (
+        <section style={{ color: "#b45309" }}>
+          <h2>Delivery Warning</h2>
+          <pre style={{ whiteSpace: "pre-wrap" }}>{warning}</pre>
         </section>
       ) : null}
       {desktopExport ? (

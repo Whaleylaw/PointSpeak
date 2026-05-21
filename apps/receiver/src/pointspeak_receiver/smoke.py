@@ -16,7 +16,9 @@ PNG_1X1 = base64.b64decode(
 
 def run() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        main.DEFAULT_STORAGE_ROOT = Path(tmp)
+        main.DEFAULT_STORAGE_ROOT = Path(tmp) / "sessions"
+        main.DEFAULT_BRIDGE_ROOT = Path(tmp) / "bridge"
+        main.DEFAULT_DESKTOP_INBOX = Path(tmp) / "desktop-inbox"
         req = CreateSessionRequest(
             mode="snapshot",
             source="receiver-smoke",
@@ -209,6 +211,30 @@ def run() -> None:
         if not Path(desktop.exportPath).exists():
             raise AssertionError("Desktop export not written")
 
+        bridge_status = main.bridge_status()
+        if "activeLease" not in bridge_status:
+            raise AssertionError("Bridge status missing active lease field")
+
+        queued = main.bridge_queue(main.BridgeQueueRequest(sessionId=result.sessionId))
+        if queued.target != "unclaimed" or queued.status != "queued":
+            raise AssertionError(f"Unexpected bridge queue response: {queued}")
+
+        activated = main.activate_bridge(main.BridgeActivateRequest(agent="coder", ttlMinutes=10, includeBacklogMinutes=60))
+        if activated["activeLease"]["agent"] != "coder":
+            raise AssertionError(f"Bridge lease did not activate: {activated}")
+
+        finalized = main.bridge_finalize(result.sessionId)
+        if finalized.bridge.target != "coder":
+            raise AssertionError(f"Bridge finalize did not target active agent: {finalized.bridge}")
+        if finalized.bridge.status not in {"queued", "delivered"}:
+            raise AssertionError(f"Unexpected bridge finalization status: {finalized.bridge}")
+        inbox = main.bridge_inbox(target="coder", status="queued", limit=20)
+        if not inbox["events"]:
+            raise AssertionError("Bridge inbox did not retain queued capture")
+        claimed = main.bridge_claim(target="coder", agent="coder", limit=1)
+        if not claimed["events"] or claimed["events"][0]["status"] != "claimed":
+            raise AssertionError(f"Bridge claim failed: {claimed}")
+
         print("receiver smoke ok")
         print(result.model_dump())
         print(element_result.model_dump())
@@ -218,6 +244,7 @@ def run() -> None:
         print(intake.model_dump())
         print(replay.model_dump())
         print(desktop.model_dump())
+        print(finalized.model_dump())
 
 
 if __name__ == "__main__":
