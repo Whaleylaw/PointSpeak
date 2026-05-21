@@ -103,15 +103,26 @@ async function readPageMetadata(tabId: number): Promise<PageMetadata> {
   return pageResult.result as PageMetadata;
 }
 
+async function ensureContentScript(tabId: number): Promise<void> {
+  try {
+    await chrome.tabs.sendMessage(tabId, { type: "POINTSPEAK_PING" });
+  } catch {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
+  }
+}
+
 async function startElementPick(tabId: number, sessionId: string): Promise<void> {
+  await ensureContentScript(tabId);
   await chrome.tabs.sendMessage(tabId, { type: "POINTSPEAK_START_ELEMENT_PICK", sessionId });
 }
 
 async function startAnnotation(tabId: number, sessionId: string, elementRef: string): Promise<void> {
+  await ensureContentScript(tabId);
   await chrome.tabs.sendMessage(tabId, { type: "POINTSPEAK_START_ANNOTATION", sessionId, elementRef });
 }
 
 async function startNarration(tabId: number, sessionId: string, elementRef?: string, annotationId?: string): Promise<void> {
+  await ensureContentScript(tabId);
   await chrome.tabs.sendMessage(tabId, { type: "POINTSPEAK_START_NARRATION", sessionId, elementRef, annotationId });
 }
 

@@ -559,6 +559,11 @@ function startNarrationMode(sessionId: string, elementRef?: string, annotationRe
 }
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "POINTSPEAK_PING") {
+    sendResponse({ ok: true });
+    return true;
+  }
+
   if (message?.type === "POINTSPEAK_GET_ELEMENT_AT" && typeof message.x === "number" && typeof message.y === "number") {
     const el = document.elementFromPoint(message.x, message.y);
     if (!el) {
