@@ -139,3 +139,29 @@ A bridge activation can target a specific Hermes profile API server:
 ```
 
 If delivery fails or no lease is active, the extension displays `QUEUE`; the side panel shows the bridge event and any delivery warning.
+
+## Milestone 12 — Wake Bridge + Local STT
+
+When a lease is active, `bridge-finalize` now turns the capture into an active Coder handoff rather than a passive queued artifact. Bridge activations support:
+
+```json
+{
+  "agent": "coder",
+  "ttlMinutes": 120,
+  "hermesApiUrl": "http://127.0.0.1:8642",
+  "apiKeyEnv": "POINTSPEAK_HERMES_API_KEY",
+  "notifyTarget": "telegram",
+  "wakeChat": true
+}
+```
+
+With `wakeChat: true`, the Hermes run instructions tell Coder to send a concise response to `notifyTarget` (for example the Telegram home chat) so the capture wakes the user-facing chat instead of requiring a manual follow-up message.
+
+Narration transcription is best-effort and local-first. If `faster-whisper` is installed, missing narration transcripts are generated during intake/finalize and written back to `narrations.ndjson`; if it is unavailable or fails, capture still succeeds and the narration metadata records the STT status.
+
+Optional local STT setup:
+
+```bash
+pip install faster-whisper
+export POINTSPEAK_STT_MODEL=base   # optional; defaults to base
+```

@@ -24,6 +24,7 @@ DEFAULT_HERMES_MODEL = os.environ.get("POINTSPEAK_HERMES_MODEL", "hermes-agent")
 DEFAULT_HERMES_TIMEOUT_SECONDS = float(os.environ.get("POINTSPEAK_HERMES_TIMEOUT_SECONDS", "3"))
 DEFAULT_DESKTOP_INBOX = Path(os.environ.get("POINTSPEAK_DESKTOP_INBOX", Path.home() / "Github" / "RoscoeDesktop" / ".pointspeak-inbox"))
 DEFAULT_BRIDGE_ROOT = Path(os.environ.get("POINTSPEAK_BRIDGE_ROOT", DEFAULT_STORAGE_ROOT.parent / "bridge"))
+DEFAULT_STT_MODEL = os.environ.get("POINTSPEAK_STT_MODEL", "base")
 
 app = FastAPI(title="PointSpeak Receiver", version="0.1.0")
 app.add_middleware(
@@ -179,6 +180,18 @@ class SubmitHandoffResponse(BaseModel):
     error: str | None = None
 
 
+def bridge_wake_instructions(lease: dict[str, Any]) -> str:
+    notify_target = str(lease.get("notifyTarget") or os.environ.get("POINTSPEAK_NOTIFY_TARGET") or "telegram").strip()
+    return (
+        "You are Coder receiving a live PointSpeak visual briefing through an active bridge lease. "
+        "Treat this as a user-initiated message from Aaron, not a passive background artifact. "
+        "Read the bundle/intake/replay paths in the prompt, summarize what Aaron pointed at, include any narration transcript, "
+        "and propose or take the next concrete coding/debugging step if it is safe and obvious. "
+        f"Before your final response, use the messaging/send_message tool to send your concise response to `{notify_target}` so Aaron's current chat is woken up. "
+        "If that tool is unavailable, say so in your final response and still provide the analysis."
+    )
+
+
 class RedactionRegion(BaseModel):
     redactionId: str
     reason: str = "user-selected"
@@ -227,6 +240,8 @@ class BridgeActivateRequest(BaseModel):
     hermesApiUrl: str | None = None
     apiKeyEnv: str | None = None
     model: str | None = None
+    notifyTarget: str | None = None
+    wakeChat: bool = True
     includeBacklogMinutes: int = Field(default=0, ge=0, le=7 * 24 * 60)
 
 
@@ -409,10 +424,16 @@ def write_json(path: Path, data: object) -> None:
     path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def append_ndjson(path: Path, data: object) -> None:
+def append_ndjson(path: Path, row: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(data, sort_keys=True) + "\n")
+        handle.write(json.dumps(row, sort_keys=True) + "\n")
+
+
+def write_ndjson(path: Path, rows: list[dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    text = "".join(json.dumps(row, sort_keys=True) + "\n" for row in rows)
+    path.write_text(text, encoding="utf-8")
 
 
 def read_ndjson(path: Path) -> list[dict[str, Any]]:
@@ -423,6 +444,63 @@ def read_ndjson(path: Path) -> list[dict[str, Any]]:
         if line.strip():
             rows.append(json.loads(line))
     return rows
+
+
+def transcribe_audio_file(audio_path: Path) -> tuple[str | None, dict[str, Any]]:
+    """Best-effort local speech-to-text for captured narration audio.
+
+    Uses faster-whisper when installed. The receiver remains local-capture-first:
+    transcription failures are recorded as metadata instead of failing capture.
+    """
+    if os.environ.get("POINTSPEAK_STT_ENABLED", "true").lower() in {"0", "false", "no", "off"}:
+        return None, {"status": "disabled"}
+    try:
+        from faster_whisper import WhisperModel  # type: ignore[import-not-found]
+    except Exception as exc:  # pragma: no cover - depends on optional local package
+        return None, {"status": "unavailable", "provider": "faster-whisper", "error": str(exc)}
+    try:  # pragma: no cover - exercised only when model/ffmpeg are locally available
+        model_name = os.environ.get("POINTSPEAK_STT_MODEL", DEFAULT_STT_MODEL)
+        device = os.environ.get("POINTSPEAK_STT_DEVICE", "auto")
+        compute_type = os.environ.get("POINTSPEAK_STT_COMPUTE_TYPE", "auto")
+        kwargs: dict[str, Any] = {}
+        if device != "auto":
+            kwargs["device"] = device
+        if compute_type != "auto":
+            kwargs["compute_type"] = compute_type
+        model = WhisperModel(model_name, **kwargs)
+        segments, info = model.transcribe(str(audio_path), vad_filter=True)
+        transcript = " ".join(segment.text.strip() for segment in segments if segment.text.strip()).strip()
+        metadata = {
+            "status": "ok" if transcript else "empty",
+            "provider": "faster-whisper",
+            "model": model_name,
+            "language": getattr(info, "language", None),
+            "languageProbability": getattr(info, "language_probability", None),
+        }
+        return transcript or None, metadata
+    except Exception as exc:
+        return None, {"status": "failed", "provider": "faster-whisper", "error": str(exc)}
+
+
+def transcribe_missing_narrations(root: Path) -> None:
+    narrations_path = root / "narrations.ndjson"
+    narrations = read_ndjson(narrations_path)
+    changed = False
+    for narration in narrations:
+        if narration.get("transcript") or not narration.get("audio"):
+            continue
+        audio_path = root / str(narration["audio"])
+        if not audio_path.exists():
+            narration.setdefault("metadata", {})["transcription"] = {"status": "missing-audio"}
+            changed = True
+            continue
+        transcript, metadata = transcribe_audio_file(audio_path)
+        narration.setdefault("metadata", {})["transcription"] = metadata
+        if transcript:
+            narration["transcript"] = transcript
+        changed = True
+    if changed:
+        write_ndjson(narrations_path, narrations)
 
 
 def decode_data_url(data_url: str) -> bytes:
@@ -695,6 +773,7 @@ for (const item of overlays) {{
 
 
 def write_intake_artifacts(session_id: str, root: Path) -> dict[str, Any]:
+    transcribe_missing_narrations(root)
     replay_path = write_replay_html(session_id, root)
     intake = build_action_draft(session_id, root)
     intake["artifacts"]["replayHtml"] = str(replay_path)
@@ -1210,6 +1289,8 @@ def activate_bridge(req: BridgeActivateRequest) -> dict[str, object]:
         "hermesApiUrl": req.hermesApiUrl,
         "apiKeyEnv": req.apiKeyEnv,
         "model": req.model,
+        "notifyTarget": req.notifyTarget,
+        "wakeChat": req.wakeChat,
         "includeBacklogMinutes": req.includeBacklogMinutes,
     }
     state = {"activeLease": lease, "updatedAt": utc_now()}
@@ -1308,7 +1389,11 @@ def bridge_finalize(session_id: str) -> BridgeFinalizeResponse:
             handoff = submit_handoff_to_hermes(
                 session_id,
                 root,
-                SubmitHandoffRequest(hermesApiUrl=str(lease.get("hermesApiUrl")), model=lease.get("model") or DEFAULT_HERMES_MODEL),
+                SubmitHandoffRequest(
+                    hermesApiUrl=str(lease.get("hermesApiUrl")),
+                    model=lease.get("model") or DEFAULT_HERMES_MODEL,
+                    instructions=bridge_wake_instructions(lease) if lease.get("wakeChat", True) else None,
+                ),
             )
         finally:
             if previous is None:

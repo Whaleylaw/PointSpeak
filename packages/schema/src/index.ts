@@ -123,6 +123,8 @@ export const BridgeLeaseSchema = z.object({
   hermesApiUrl: z.string().optional().nullable(),
   apiKeyEnv: z.string().optional().nullable(),
   model: z.string().optional().nullable(),
+  notifyTarget: z.string().optional().nullable(),
+  wakeChat: z.boolean().default(true),
   includeBacklogMinutes: z.number().int().nonnegative().default(0),
 });
 
