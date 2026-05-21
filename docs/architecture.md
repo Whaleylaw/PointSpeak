@@ -51,6 +51,46 @@ Narrated voice notes are now part of the local bundle:
 - The receiver writes audio to `media/<narrationId>.webm`, appends metadata to `narrations.ndjson`, appends a `narration.captured` timeline event, and refreshes handoff files.
 - Optional transcript/summary text is included in the handoff so agents can use narration even before automatic STT is added.
 
+## Milestone 6 Implementation
+
+Hermes intake turns capture artifacts into action-oriented agent context:
+
+- `POST /sessions/{session_id}/intake` refreshes the bundle and writes `handoff/intake.json`.
+- `handoff/action-draft.md` summarizes observed intent, capture points, artifacts, and suggested next actions.
+- Handoff markdown now links intake, action draft, and replay artifacts.
+
+## Milestone 7 Implementation
+
+Browser replay is generated locally:
+
+- `GET /sessions/{session_id}/replay` writes `replay/index.html`.
+- The replay page loads the captured screenshot and overlays element boxes, annotation shapes, and redaction masks.
+- It is static HTML so it can be opened directly from disk without a server.
+
+## Milestone 8 Implementation
+
+Desktop integration is a file-based inbox handoff:
+
+- `POST /sessions/{session_id}/desktop-export` writes a RoscoeDesktop payload to `POINTSPEAK_DESKTOP_INBOX`.
+- If the environment variable is unset, the default is `~/Github/RoscoeDesktop/.pointspeak-inbox`.
+- The export includes the bundle path and the normalized agent intake object.
+
+## Milestone 9 Implementation
+
+Privacy controls are persisted in `privacy-report.json`:
+
+- `POST /sessions/{session_id}/privacy` updates text redaction toggles and screenshot redaction regions.
+- Intake generation redacts common emails, phone numbers, credit cards, and token/password-style secrets from shared text fields.
+- Replay generation renders screenshot redaction regions as opaque overlays so reviewers can confirm mask placement.
+
+## Milestone 10 Implementation
+
+Multi-capture sessions append repeated point groups to the same bundle:
+
+- The extension asks whether to add another point after narration is captured or skipped.
+- The receiver groups elements, annotations, and narrations into `capturePoints`.
+- `GET /sessions/{session_id}/capture-points` exposes the grouped view used by Hermes intake and desktop export.
+
 ## Design Principles
 
 - Screenshot is the visual source of truth.

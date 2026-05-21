@@ -22,6 +22,7 @@ SCHEMA_VERSION = "0.1.0"
 DEFAULT_HERMES_API_URL = os.environ.get("POINTSPEAK_HERMES_API_URL", "http://127.0.0.1:8642")
 DEFAULT_HERMES_MODEL = os.environ.get("POINTSPEAK_HERMES_MODEL", "hermes-agent")
 DEFAULT_HERMES_TIMEOUT_SECONDS = float(os.environ.get("POINTSPEAK_HERMES_TIMEOUT_SECONDS", "3"))
+DEFAULT_DESKTOP_INBOX = Path(os.environ.get("POINTSPEAK_DESKTOP_INBOX", Path.home() / "Github" / "RoscoeDesktop" / ".pointspeak-inbox"))
 
 app = FastAPI(title="PointSpeak Receiver", version="0.1.0")
 app.add_middleware(
@@ -177,6 +178,48 @@ class SubmitHandoffResponse(BaseModel):
     error: str | None = None
 
 
+class RedactionRegion(BaseModel):
+    redactionId: str
+    reason: str = "user-selected"
+    shape: AnnotationShape
+    replacement: str = "masked"
+
+
+class PrivacyControls(BaseModel):
+    redactTextPatterns: bool = True
+    redactEmails: bool = True
+    redactPhones: bool = True
+    redactCreditCards: bool = True
+    redactSecrets: bool = True
+    screenshotRegions: list[RedactionRegion] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
+
+
+class UpdatePrivacyControlsRequest(BaseModel):
+    controls: PrivacyControls
+
+
+class IntakeResponse(BaseModel):
+    sessionId: str
+    intakePath: str
+    actionDraftPath: str
+    replayPath: str
+    summary: str
+    suggestedActions: list[str]
+    redactionsApplied: list[str] = Field(default_factory=list)
+
+
+class ReplayResponse(BaseModel):
+    sessionId: str
+    replayPath: str
+
+
+class DesktopExportResponse(BaseModel):
+    sessionId: str
+    exportPath: str
+    desktopInbox: str
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -271,6 +314,235 @@ def narration_label(narration: dict[str, Any]) -> str:
     return ": ".join([parts[0], " ".join(parts[1:])]) if len(parts) > 1 else parts[0]
 
 
+def load_privacy_report(root: Path) -> dict[str, Any]:
+    path = root / "privacy-report.json"
+    if not path.exists():
+        return {"redactionControls": PrivacyControls().model_dump(mode="json"), "redactionsApplied": []}
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def redact_text(value: str | None, privacy: dict[str, Any]) -> tuple[str | None, list[str]]:
+    if not value:
+        return value, []
+    import re
+
+    controls = privacy.get("redactionControls") or {}
+    if not controls.get("redactTextPatterns", True):
+        return value, []
+    redactions: list[str] = []
+    text = value
+    patterns: list[tuple[str, str, str]] = []
+    if controls.get("redactEmails", True):
+        patterns.append(("email", r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", "[redacted-email]"))
+    if controls.get("redactPhones", True):
+        patterns.append(("phone", r"(?<!\d)(?:\+?1[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}(?!\d)", "[redacted-phone]"))
+    if controls.get("redactCreditCards", True):
+        patterns.append(("credit-card", r"(?<!\d)(?:\d[ -]*?){13,19}(?!\d)", "[redacted-card]"))
+    if controls.get("redactSecrets", True):
+        patterns.append(("secret", r"\b(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+", "[redacted-secret]"))
+    for label, pattern, replacement in patterns:
+        text, count = re.subn(pattern, replacement, text, flags=re.IGNORECASE)
+        if count:
+            redactions.append(label)
+    return text, redactions
+
+
+def sanitized_records(root: Path) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    privacy = load_privacy_report(root)
+    redactions: list[str] = []
+    page = load_page(root)
+    for key in ("url", "title"):
+        page[key], found = redact_text(page.get(key), privacy)
+        redactions.extend(found)
+
+    def sanitize_row(row: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+        clean = dict(row)
+        for key in keys:
+            clean[key], found = redact_text(clean.get(key), privacy)
+            redactions.extend(found)
+        return clean
+
+    elements = [sanitize_row(row, ("name", "text", "domPath")) for row in read_ndjson(root / "elements.ndjson")]
+    annotations = [sanitize_row(row, ("text",)) for row in read_ndjson(root / "annotations.ndjson")]
+    narrations = [sanitize_row(row, ("transcript",)) for row in read_ndjson(root / "narrations.ndjson")]
+    return page, elements, annotations, narrations, sorted(set(redactions))
+
+
+def build_capture_points(
+    elements: list[dict[str, Any]], annotations: list[dict[str, Any]], narrations: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    by_element = {row.get("elementRef"): row for row in elements}
+    by_annotation = {row.get("annotationId"): row for row in annotations}
+    points: list[dict[str, Any]] = []
+    used_annotations: set[str] = set()
+    for annotation in annotations:
+        annotation_id = annotation.get("annotationId")
+        target_refs = annotation.get("targetElementRefs") or []
+        related_narrations = [n for n in narrations if annotation_id in (n.get("targetAnnotationRefs") or [])]
+        for narration in related_narrations:
+            used_annotations.add(str(annotation_id))
+        points.append(
+            {
+                "pointId": f"point_{len(points) + 1}",
+                "elements": [by_element[ref] for ref in target_refs if ref in by_element],
+                "annotation": annotation,
+                "narrations": related_narrations,
+            }
+        )
+    for element in elements:
+        element_ref = element.get("elementRef")
+        if not any(element_ref in (p.get("annotation", {}).get("targetElementRefs") or []) for p in points):
+            points.append({"pointId": f"point_{len(points) + 1}", "elements": [element], "annotation": None, "narrations": []})
+    for narration in narrations:
+        if not narration.get("targetAnnotationRefs"):
+            points.append({"pointId": f"point_{len(points) + 1}", "elements": [], "annotation": None, "narrations": [narration]})
+    return points
+
+
+def build_action_draft(session_id: str, root: Path) -> dict[str, Any]:
+    page, elements, annotations, narrations, redactions = sanitized_records(root)
+    points = build_capture_points(elements, annotations, narrations)
+    intent_parts: list[str] = []
+    for annotation in annotations:
+        if annotation.get("text"):
+            intent_parts.append(str(annotation["text"]))
+    for narration in narrations:
+        if narration.get("transcript"):
+            intent_parts.append(str(narration["transcript"]))
+    observed_intent = " ".join(intent_parts).strip() or "User pointed at captured UI context without an explicit typed or spoken request."
+    first_element = elements[0] if elements else {}
+    label = first_element.get("name") or first_element.get("text") or first_element.get("role") or first_element.get("tagName") or "captured UI"
+    summary = f"PointSpeak capture on {page.get('title') or page.get('url') or 'unknown page'} referencing {len(points)} point(s); primary target: {label}."
+    suggested = [
+        "Open the replay HTML to inspect the screenshot with annotation overlays.",
+        "Use the selected element selectors to locate the owning component or test target.",
+        "Translate the annotation/narration into a concrete bugfix or UX task before editing files.",
+    ]
+    if redactions:
+        suggested.insert(0, "Review privacy redactions before sharing this bundle outside the local machine.")
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "sessionId": session_id,
+        "bundlePath": str(root),
+        "page": page,
+        "capturePoints": points,
+        "observedIntent": observed_intent,
+        "summary": summary,
+        "suggestedActions": suggested,
+        "artifacts": {
+            "handoffMarkdown": str(root / "handoff" / "latest.md"),
+            "handoffJson": str(root / "handoff" / "latest.json"),
+            "replayHtml": str(root / "replay" / "index.html"),
+            "privacyReport": str(root / "privacy-report.json"),
+        },
+        "redactionsApplied": redactions,
+    }
+
+
+def render_action_draft(intake: dict[str, Any]) -> str:
+    actions = "\n".join(f"- {action}" for action in intake.get("suggestedActions", []))
+    points = "\n".join(
+        f"- {point['pointId']}: {len(point.get('elements') or [])} element(s), "
+        f"annotation={bool(point.get('annotation'))}, narrations={len(point.get('narrations') or [])}"
+        for point in intake.get("capturePoints", [])
+    ) or "- none"
+    return f"""# PointSpeak Action Draft
+
+## Summary
+{intake.get('summary')}
+
+## Observed Intent
+{intake.get('observedIntent')}
+
+## Capture Points
+{points}
+
+## Suggested Next Actions
+{actions}
+
+## Artifacts
+- Replay: {intake.get('artifacts', {}).get('replayHtml')}
+- Handoff JSON: {intake.get('artifacts', {}).get('handoffJson')}
+- Privacy Report: {intake.get('artifacts', {}).get('privacyReport')}
+"""
+
+
+def write_replay_html(session_id: str, root: Path) -> Path:
+    page, elements, annotations, narrations, _redactions = sanitized_records(root)
+    manifest = load_manifest(root)
+    media = list(manifest.get("media") or [])
+    screenshot = next((item for item in media if item.lower().endswith((".png", ".jpg", ".jpeg", ".webp"))), None)
+    regions = (load_privacy_report(root).get("redactionControls") or {}).get("screenshotRegions") or []
+    overlay_items: list[dict[str, Any]] = []
+    for element in elements:
+        if element.get("boundingBox"):
+            overlay_items.append({"kind": "element", "label": element.get("elementRef"), "shape": element["boundingBox"]})
+    for annotation in annotations:
+        if annotation.get("shape"):
+            overlay_items.append({"kind": "annotation", "label": annotation.get("annotationId"), "shape": annotation["shape"]})
+    for region in regions:
+        if region.get("shape"):
+            overlay_items.append({"kind": "redaction", "label": region.get("reason", "redacted"), "shape": region["shape"]})
+    html = f"""<!doctype html>
+<meta charset=\"utf-8\" />
+<title>PointSpeak Replay {session_id}</title>
+<style>
+body {{ font-family: system-ui, sans-serif; margin: 24px; background: #111827; color: #f9fafb; }}
+.stage {{ position: relative; display: inline-block; border: 1px solid #374151; background: #000; }}
+.stage img {{ display: block; max-width: min(96vw, 1400px); height: auto; }}
+.box {{ position: absolute; box-sizing: border-box; border: 3px solid #38bdf8; background: rgba(56,189,248,.12); color: #fff; font: 12px system-ui; padding: 2px 4px; overflow: visible; }}
+.box.annotation {{ border-color: #f97316; background: rgba(249,115,22,.16); }}
+.box.redaction {{ border-color: #111827; background: rgba(17,24,39,.82); }}
+pre {{ white-space: pre-wrap; background: #1f2937; padding: 12px; border-radius: 8px; }}
+</style>
+<h1>PointSpeak Replay</h1>
+<p><strong>Session:</strong> {session_id}</p>
+<p><strong>Page:</strong> {page.get('title') or ''} — {page.get('url') or ''}</p>
+<div class=\"stage\">
+  {'<img src="../' + screenshot + '" alt="captured screenshot" />' if screenshot else '<div style="padding:80px">No screenshot captured.</div>'}
+  <script id=\"pointspeak-overlays\" type=\"application/json\">{json.dumps(overlay_items)}</script>
+</div>
+<h2>Narration</h2>
+<pre>{json.dumps(narrations, indent=2)}</pre>
+<script>
+const stage = document.querySelector('.stage');
+const overlays = JSON.parse(document.getElementById('pointspeak-overlays').textContent);
+for (const item of overlays) {{
+  const s = item.shape || {{}};
+  const div = document.createElement('div');
+  div.className = `box ${{item.kind}}`;
+  div.style.left = `${{s.x || 0}}px`;
+  div.style.top = `${{s.y || 0}}px`;
+  div.style.width = `${{Math.max(s.width || 1, 1)}}px`;
+  div.style.height = `${{Math.max(s.height || 1, 1)}}px`;
+  div.textContent = item.label || item.kind;
+  stage.appendChild(div);
+}}
+</script>
+"""
+    replay_dir = root / "replay"
+    replay_dir.mkdir(parents=True, exist_ok=True)
+    replay_path = replay_dir / "index.html"
+    replay_path.write_text(html, encoding="utf-8")
+    return replay_path
+
+
+def write_intake_artifacts(session_id: str, root: Path) -> dict[str, Any]:
+    replay_path = write_replay_html(session_id, root)
+    intake = build_action_draft(session_id, root)
+    intake["artifacts"]["replayHtml"] = str(replay_path)
+    privacy_path = root / "privacy-report.json"
+    if privacy_path.exists():
+        privacy = load_privacy_report(root)
+        privacy["redactionsApplied"] = intake.get("redactionsApplied", [])
+        write_json(privacy_path, privacy)
+    handoff_dir = root / "handoff"
+    handoff_dir.mkdir(parents=True, exist_ok=True)
+    write_json(handoff_dir / "intake.json", intake)
+    (handoff_dir / "action-draft.md").write_text(render_action_draft(intake), encoding="utf-8")
+    return intake
+
+
 def render_handoff(session_id: str, root: Path, media: list[str]) -> str:
     page = load_page(root)
     elements = read_ndjson(root / "elements.ndjson")
@@ -321,7 +593,7 @@ def render_handoff(session_id: str, root: Path, media: list[str]) -> str:
     return f"""# PointSpeak Brief: {title}
 
 ## User Request
-_No standalone user request captured yet. Milestone 3 captures visual annotations and notes._
+{build_action_draft(session_id, root).get('observedIntent')}
 
 ## Page
 - URL: {page.get('url', '')}
@@ -338,6 +610,14 @@ _No standalone user request captured yet. Milestone 3 captures visual annotation
 
 ## Narration
 {narration_block}
+
+## Capture Points
+{len(build_capture_points(elements, annotations, narrations))} point(s) captured. Multi-capture sessions are supported by appending more elements, annotations, and narrations to this bundle.
+
+## Agent Intake
+- Intake JSON: {root / 'handoff' / 'intake.json'}
+- Action Draft: {root / 'handoff' / 'action-draft.md'}
+- Replay: {root / 'replay' / 'index.html'}
 
 ## Artifacts
 - Session ID: {session_id}
@@ -378,6 +658,10 @@ def write_manifest(root: Path, session_id: str, mode: str, source: str, media: l
         "privacyReport": "privacy-report.json",
         "media": media,
         "handoff": "handoff/latest.md",
+        "intake": "handoff/intake.json",
+        "actionDraft": "handoff/action-draft.md",
+        "replay": "replay/index.html",
+        "desktopExport": "desktop/latest.json",
         "hashes": build_file_hashes(root),
     }
     write_json(root / "manifest.json", manifest)
@@ -404,8 +688,10 @@ def refresh_handoff_and_manifest(root: Path, session_id: str) -> None:
             "elements": read_ndjson(root / "elements.ndjson"),
             "annotations": read_ndjson(root / "annotations.ndjson"),
             "narrations": read_ndjson(root / "narrations.ndjson"),
+            "capturePoints": build_capture_points(read_ndjson(root / "elements.ndjson"), read_ndjson(root / "annotations.ndjson"), read_ndjson(root / "narrations.ndjson")),
         },
     )
+    write_intake_artifacts(session_id, root)
     write_manifest(
         root,
         session_id=session_id,
@@ -585,6 +871,8 @@ def create_session(req: CreateSessionRequest) -> CreateSessionResponse:
                 "audioCaptured": False,
             },
             "warnings": [],
+            "redactionControls": PrivacyControls().model_dump(mode="json"),
+            "redactionsApplied": [],
         },
     )
     timeline_event = {
@@ -741,6 +1029,78 @@ def submit_handoff(session_id: str, req: SubmitHandoffRequest | None = None) -> 
     root = require_session_root(session_id)
     refresh_handoff_and_manifest(root, session_id)
     return submit_handoff_to_hermes(session_id, root, req or SubmitHandoffRequest())
+
+
+@app.post("/sessions/{session_id}/privacy")
+def update_privacy_controls(session_id: str, req: UpdatePrivacyControlsRequest) -> dict[str, object]:
+    root = require_session_root(session_id)
+    privacy = load_privacy_report(root)
+    privacy["redactionControls"] = req.controls.model_dump(mode="json")
+    privacy.setdefault("redactionsApplied", [])
+    write_json(root / "privacy-report.json", privacy)
+    refresh_handoff_and_manifest(root, session_id)
+    return {"sessionId": session_id, "privacyReport": str(root / "privacy-report.json"), "controls": privacy["redactionControls"]}
+
+
+@app.post("/sessions/{session_id}/intake", response_model=IntakeResponse)
+def create_intake(session_id: str) -> IntakeResponse:
+    root = require_session_root(session_id)
+    refresh_handoff_and_manifest(root, session_id)
+    intake = write_intake_artifacts(session_id, root)
+    return IntakeResponse(
+        sessionId=session_id,
+        intakePath=str(root / "handoff" / "intake.json"),
+        actionDraftPath=str(root / "handoff" / "action-draft.md"),
+        replayPath=str(root / "replay" / "index.html"),
+        summary=str(intake.get("summary", "")),
+        suggestedActions=list(intake.get("suggestedActions") or []),
+        redactionsApplied=list(intake.get("redactionsApplied") or []),
+    )
+
+
+@app.get("/sessions/{session_id}/replay", response_model=ReplayResponse)
+def create_replay(session_id: str) -> ReplayResponse:
+    root = require_session_root(session_id)
+    replay_path = write_replay_html(session_id, root)
+    refresh_handoff_and_manifest(root, session_id)
+    return ReplayResponse(sessionId=session_id, replayPath=str(replay_path))
+
+
+@app.get("/sessions/{session_id}/capture-points")
+def get_capture_points(session_id: str) -> dict[str, object]:
+    root = require_session_root(session_id)
+    page, elements, annotations, narrations, redactions = sanitized_records(root)
+    return {
+        "sessionId": session_id,
+        "page": page,
+        "capturePoints": build_capture_points(elements, annotations, narrations),
+        "redactionsApplied": redactions,
+    }
+
+
+@app.post("/sessions/{session_id}/desktop-export", response_model=DesktopExportResponse)
+def export_desktop_context(session_id: str) -> DesktopExportResponse:
+    root = require_session_root(session_id)
+    refresh_handoff_and_manifest(root, session_id)
+    intake = write_intake_artifacts(session_id, root)
+    DEFAULT_DESKTOP_INBOX.mkdir(parents=True, exist_ok=True)
+    export_path = DEFAULT_DESKTOP_INBOX / f"{session_id}.json"
+    write_json(
+        export_path,
+        {
+            "schemaVersion": SCHEMA_VERSION,
+            "source": "pointspeak",
+            "createdAt": utc_now(),
+            "sessionId": session_id,
+            "bundlePath": str(root),
+            "intake": intake,
+        },
+    )
+    desktop_dir = root / "desktop"
+    desktop_dir.mkdir(parents=True, exist_ok=True)
+    write_json(desktop_dir / "latest.json", {"exportPath": str(export_path), "desktopInbox": str(DEFAULT_DESKTOP_INBOX)})
+    refresh_handoff_and_manifest(root, session_id)
+    return DesktopExportResponse(sessionId=session_id, exportPath=str(export_path), desktopInbox=str(DEFAULT_DESKTOP_INBOX))
 
 
 @app.get("/sessions/{session_id}/handoff.md", response_class=PlainTextResponse)

@@ -54,6 +54,22 @@ type AddNarrationResponse = {
   handoff: string;
 };
 
+type IntakeResponse = {
+  sessionId: string;
+  intakePath: string;
+  actionDraftPath: string;
+  replayPath: string;
+  summary: string;
+  suggestedActions: string[];
+  redactionsApplied: string[];
+};
+
+type DesktopExportResponse = {
+  sessionId: string;
+  exportPath: string;
+  desktopInbox: string;
+};
+
 async function setBadge(text: string, color: string): Promise<void> {
   await chrome.action.setBadgeText({ text });
   await chrome.action.setBadgeBackgroundColor({ color });
@@ -97,6 +113,19 @@ async function startAnnotation(tabId: number, sessionId: string, elementRef: str
 
 async function startNarration(tabId: number, sessionId: string, elementRef?: string, annotationId?: string): Promise<void> {
   await chrome.tabs.sendMessage(tabId, { type: "POINTSPEAK_START_NARRATION", sessionId, elementRef, annotationId });
+}
+
+async function askForAnotherPoint(tabId: number, sessionId: string): Promise<boolean> {
+  const [result] = await chrome.scripting.executeScript({
+    target: { tabId },
+    func: () => window.confirm("Add another PointSpeak capture point to this same session?"),
+  });
+  if (result.result) {
+    await setBadge("PICK", "#7c3aed");
+    await startElementPick(tabId, sessionId);
+    return true;
+  }
+  return false;
 }
 
 async function postPickedElement(sessionId: string, element: unknown): Promise<AddElementResponse> {
@@ -149,6 +178,31 @@ async function submitHandoff(sessionId: string): Promise<SubmitHandoffResponse> 
     throw new Error(`PointSpeak receiver rejected handoff: ${await response.text()}`);
   }
   return response.json() as Promise<SubmitHandoffResponse>;
+}
+
+async function createIntake(sessionId: string): Promise<IntakeResponse> {
+  const response = await fetch(`${RECEIVER_URL}/sessions/${sessionId}/intake`, { method: "POST" });
+  if (!response.ok) throw new Error(`PointSpeak receiver rejected intake: ${await response.text()}`);
+  return response.json() as Promise<IntakeResponse>;
+}
+
+async function exportDesktop(sessionId: string): Promise<DesktopExportResponse> {
+  const response = await fetch(`${RECEIVER_URL}/sessions/${sessionId}/desktop-export`, { method: "POST" });
+  if (!response.ok) throw new Error(`PointSpeak receiver rejected desktop export: ${await response.text()}`);
+  return response.json() as Promise<DesktopExportResponse>;
+}
+
+async function finalizeSession(sessionId: string): Promise<{ intake: IntakeResponse; desktop: DesktopExportResponse; handoff: SubmitHandoffResponse }> {
+  const intake = await createIntake(sessionId);
+  const desktop = await exportDesktop(sessionId);
+  const handoff = await submitHandoff(sessionId);
+  await chrome.storage.local.set({
+    lastPointSpeakIntake: intake,
+    lastPointSpeakDesktopExport: desktop,
+    lastPointSpeakHandoff: handoff,
+    lastPointSpeakError: handoff.error ?? null,
+  });
+  return { intake, desktop, handoff };
 }
 
 chrome.runtime.onInstalled.addListener(() => {
@@ -231,11 +285,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
         await setBadge("SEND", "#2563eb");
-        const handoff = await submitHandoff(message.sessionId);
-        await chrome.storage.local.set({ lastPointSpeakHandoff: handoff, lastPointSpeakError: handoff.error ?? null });
-        await setBadge(handoff.status === "submitted" ? "SENT" : "SAVE", handoff.status === "submitted" ? "#16a34a" : "#f97316");
+        const finalized = await finalizeSession(message.sessionId);
+        await setBadge(finalized.handoff.status === "submitted" ? "SENT" : "SAVE", finalized.handoff.status === "submitted" ? "#16a34a" : "#f97316");
         await clearBadgeSoon();
-        sendResponse({ ok: true, result, handoff });
+        sendResponse({ ok: true, result, ...finalized });
       })
       .catch(async (error) => {
         await setBadge("ERR", "#dc2626");
@@ -252,11 +305,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(async (result) => {
         await chrome.storage.local.set({ lastPointSpeakNarration: result, lastPointSpeakError: null });
         await setBadge("SEND", "#2563eb");
-        const handoff = await submitHandoff(message.sessionId);
-        await chrome.storage.local.set({ lastPointSpeakHandoff: handoff, lastPointSpeakError: handoff.error ?? null });
-        await setBadge(handoff.status === "submitted" ? "SENT" : "SAVE", handoff.status === "submitted" ? "#16a34a" : "#f97316");
+        const finalized = await finalizeSession(message.sessionId);
+        await setBadge(finalized.handoff.status === "submitted" ? "SENT" : "SAVE", finalized.handoff.status === "submitted" ? "#16a34a" : "#f97316");
         await clearBadgeSoon();
-        sendResponse({ ok: true, result, handoff });
+        sendResponse({ ok: true, result, ...finalized });
       })
       .catch(async (error) => {
         await setBadge("ERR", "#dc2626");
@@ -269,11 +321,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   if (message?.type === "POINTSPEAK_NARRATION_SKIPPED" && typeof message.sessionId === "string") {
     submitHandoff(message.sessionId)
-      .then(async (handoff) => {
-        await chrome.storage.local.set({ lastPointSpeakHandoff: handoff, lastPointSpeakError: handoff.error ?? null });
-        await setBadge(handoff.status === "submitted" ? "SENT" : "SAVE", handoff.status === "submitted" ? "#16a34a" : "#f97316");
+      .then(async () => {
+        if (sender.tab?.id && await askForAnotherPoint(sender.tab.id, message.sessionId)) {
+          sendResponse({ ok: true, continued: true });
+          return;
+        }
+        await setBadge("SEND", "#2563eb");
+        const finalized = await finalizeSession(message.sessionId);
+        await setBadge(finalized.handoff.status === "submitted" ? "SENT" : "SAVE", finalized.handoff.status === "submitted" ? "#16a34a" : "#f97316");
         await clearBadgeSoon();
-        sendResponse({ ok: true, handoff });
+        sendResponse({ ok: true, ...finalized });
       })
       .catch(async (error) => {
         await setBadge("ERR", "#dc2626");

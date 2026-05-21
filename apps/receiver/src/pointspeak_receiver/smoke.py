@@ -154,12 +154,70 @@ def run() -> None:
         if result.sessionId not in request_json["body"]["input"] or "PointSpeak visual briefing captured" not in request_json["body"]["input"]:
             raise AssertionError("Hermes handoff prompt missing PointSpeak context")
 
+        # Milestones 6-10: privacy controls, intake/action draft, replay, desktop export, and multi-capture points.
+        privacy_result = main.update_privacy_controls(
+            result.sessionId,
+            main.UpdatePrivacyControlsRequest(
+                controls=main.PrivacyControls(
+                    screenshotRegions=[
+                        main.RedactionRegion(
+                            redactionId="r_smoke",
+                            reason="hide account number",
+                            shape=main.AnnotationShape(x=1, y=1, width=12, height=12, coordinateSpace="viewport"),
+                        )
+                    ]
+                )
+            ),
+        )
+        if "r_smoke" not in json.dumps(privacy_result):
+            raise AssertionError("Privacy controls did not persist")
+
+        second_element_result = main.add_element(
+            result.sessionId,
+            main.AddElementRequest(
+                element=main.ElementRef(
+                    elementRef="e_smoke_two",
+                    timestampMs=0,
+                    url="http://localhost:5173/smoke",
+                    role="link",
+                    name="Second Smoke Target",
+                    text="Second Smoke Target",
+                    tagName="a",
+                    boundingBox=main.BoundingBox(x=140, y=20, width=120, height=30),
+                    selectors=[main.Selector(type="text", value="Second Smoke Target", confidence=0.5)],
+                )
+            ),
+        )
+        if second_element_result.elementRef != "e_smoke_two":
+            raise AssertionError("Second capture point element failed")
+
+        intake = main.create_intake(result.sessionId)
+        if not Path(intake.intakePath).exists() or not Path(intake.actionDraftPath).exists():
+            raise AssertionError("Intake artifacts not written")
+        if "PointSpeak capture" not in intake.summary or not intake.suggestedActions:
+            raise AssertionError(f"Unexpected intake summary: {intake}")
+
+        replay = main.create_replay(result.sessionId)
+        if not Path(replay.replayPath).exists() or "pointspeak-overlays" not in Path(replay.replayPath).read_text():
+            raise AssertionError("Replay HTML not written")
+
+        points = main.get_capture_points(result.sessionId)
+        if len(points["capturePoints"]) < 2:
+            raise AssertionError(f"Expected multi-capture points, got {points}")
+
+        desktop = main.export_desktop_context(result.sessionId)
+        if not Path(desktop.exportPath).exists():
+            raise AssertionError("Desktop export not written")
+
         print("receiver smoke ok")
         print(result.model_dump())
         print(element_result.model_dump())
         print(annotation_result.model_dump())
         print(narration_result.model_dump())
         print(handoff_result.model_dump())
+        print(intake.model_dump())
+        print(replay.model_dump())
+        print(desktop.model_dump())
 
 
 if __name__ == "__main__":

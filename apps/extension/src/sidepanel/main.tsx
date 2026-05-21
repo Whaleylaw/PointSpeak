@@ -40,12 +40,30 @@ type LastNarration = {
   handoff: string;
 };
 
+type LastIntake = {
+  sessionId: string;
+  intakePath: string;
+  actionDraftPath: string;
+  replayPath: string;
+  summary: string;
+  suggestedActions: string[];
+  redactionsApplied: string[];
+};
+
+type LastDesktopExport = {
+  sessionId: string;
+  exportPath: string;
+  desktopInbox: string;
+};
+
 function App() {
   const [session, setSession] = useState<LastSession | null>(null);
   const [element, setElement] = useState<LastElement | null>(null);
   const [annotation, setAnnotation] = useState<LastAnnotation | null>(null);
   const [narration, setNarration] = useState<LastNarration | null>(null);
   const [handoff, setHandoff] = useState<LastHandoff | null>(null);
+  const [intake, setIntake] = useState<LastIntake | null>(null);
+  const [desktopExport, setDesktopExport] = useState<LastDesktopExport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -56,6 +74,8 @@ function App() {
         "lastPointSpeakAnnotation",
         "lastPointSpeakNarration",
         "lastPointSpeakHandoff",
+        "lastPointSpeakIntake",
+        "lastPointSpeakDesktopExport",
         "lastPointSpeakError",
       ])
       .then((value) => {
@@ -64,6 +84,8 @@ function App() {
         setAnnotation((value.lastPointSpeakAnnotation as LastAnnotation | undefined) ?? null);
         setNarration((value.lastPointSpeakNarration as LastNarration | undefined) ?? null);
         setHandoff((value.lastPointSpeakHandoff as LastHandoff | undefined) ?? null);
+        setIntake((value.lastPointSpeakIntake as LastIntake | undefined) ?? null);
+        setDesktopExport((value.lastPointSpeakDesktopExport as LastDesktopExport | undefined) ?? null);
         setError((value.lastPointSpeakError as string | undefined) ?? null);
       });
   }, []);
@@ -149,6 +171,33 @@ function App() {
             <dd>
               <code>{narration.narrationsPath}</code>
             </dd>
+          </dl>
+        </section>
+      ) : null}
+      {intake ? (
+        <section>
+          <h2>Agent Intake</h2>
+          <p>{intake.summary}</p>
+          <dl>
+            <dt>Intake JSON</dt>
+            <dd><code>{intake.intakePath}</code></dd>
+            <dt>Action Draft</dt>
+            <dd><code>{intake.actionDraftPath}</code></dd>
+            <dt>Replay</dt>
+            <dd><code>{intake.replayPath}</code></dd>
+            <dt>Redactions</dt>
+            <dd><code>{intake.redactionsApplied.length ? intake.redactionsApplied.join(", ") : "none"}</code></dd>
+          </dl>
+        </section>
+      ) : null}
+      {desktopExport ? (
+        <section>
+          <h2>RoscoeDesktop Export</h2>
+          <dl>
+            <dt>Export</dt>
+            <dd><code>{desktopExport.exportPath}</code></dd>
+            <dt>Inbox</dt>
+            <dd><code>{desktopExport.desktopInbox}</code></dd>
           </dl>
         </section>
       ) : null}
