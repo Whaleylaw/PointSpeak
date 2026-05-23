@@ -1,31 +1,59 @@
 # PointSpeak
 
-Agent-ready visual briefings for coding agents.
+PointSpeak is a local-first context capture tool for giving coding agents precise visual context from a browser page. It captures screenshots, DOM metadata, selected elements, drawn annotations, typed notes, and optional voice narration, then packages that context into a portable bundle an agent can inspect or receive through a local bridge.
 
-PointSpeak captures screenshots, annotations, DOM/element metadata, and later narrated walkthroughs so a user can point at an interface, explain what they mean, and send precise implementation context to an agent.
+The goal is simple: instead of trying to describe “that button over there” in a chat box, point at it, mark it up, explain what you mean, and send the agent a reproducible visual briefing.
 
-## Current Status
+## What it does
 
-Milestones 6-10 are implemented: Hermes intake, replay, desktop export, privacy/redaction controls, and multi-capture sessions are now available:
+- Captures the visible browser tab as a screenshot.
+- Lets you pick a target DOM element and records useful metadata such as selectors, text snippets, bounds, and accessibility labels.
+- Lets you draw annotation rectangles and add notes.
+- Supports multi-point capture sessions, so one briefing can include several related UI observations.
+- Records optional voice narration, with local speech-to-text support when `faster-whisper` is installed.
+- Writes durable local `.pointspeak` bundles that can be inspected, archived, or sent to an agent.
+- Generates agent-friendly handoff artifacts, including Markdown summaries, JSON intake, privacy reports, and a local replay page.
+- Provides a bridge router for delivering finalized captures to a local Hermes-compatible agent server.
 
-- `apps/extension` — Chrome MV3 extension that captures the active visible tab, starts element-pick mode, captures annotations, optionally records short narrations, supports adding more capture points to the same session, and finalizes the Hermes/RoscoeDesktop handoff.
-- `apps/receiver` — local FastAPI receiver that writes `.pointspeak` bundles, stores narration audio/transcripts, generates Hermes intake/action drafts, writes browser replay HTML, exports RoscoeDesktop inbox payloads, and can submit them to Hermes API Server.
-- `packages/schema` — shared TypeScript schema definitions.
-- `packages/annotator` — annotation helper types.
-- `packages/capture-core` — placeholder capture/event helpers.
-- `packages/handoff` — handoff markdown helper.
-- `docs/` — architecture, privacy, and bundle-format notes.
+## Repository layout
 
-## Quick Start
+```text
+apps/
+  extension/   Chrome MV3 extension for capture, annotation, narration, and session finalization
+  receiver/    Local FastAPI receiver that stores bundles and creates handoff artifacts
+packages/
+  schema/      Shared TypeScript schemas
+  annotator/   Annotation helper types
+  capture-core/ Core capture/event helpers
+  handoff/     Handoff rendering helpers
+docs/          Architecture and bundle-format notes
+```
 
-Install/build the TypeScript workspaces:
+## Quick start
+
+### 1. Install and build the browser extension
+
+PointSpeak uses Node 22+.
 
 ```bash
 npm install
 npm run build
 ```
 
-Install/start the receiver:
+This builds the extension into:
+
+```text
+apps/extension/dist
+```
+
+Load that directory in Chrome or a Chromium-based browser:
+
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. Click **Load unpacked**.
+4. Select `apps/extension/dist`.
+
+### 2. Start the local receiver
 
 ```bash
 cd apps/receiver
@@ -35,114 +63,89 @@ pip install -e .
 pointspeak-receiver
 ```
 
-Then load `apps/extension/dist` as an unpacked Chrome extension. Clicking the PointSpeak toolbar button captures the active tab screenshot and page metadata, prompts you to click a page element, lets you drag an annotation rectangle and enter a short note, then offers an optional short voice narration. After each point you can add another point to the same session or finalize. The bundle is written into:
+By default the receiver listens on:
 
 ```text
-~/.pointspeak/sessions/<session>/session.pointspeak/
+http://127.0.0.1:48321
 ```
 
-Smoke-test the receiver without Chrome:
+### 3. Capture a page
 
-```bash
-cd apps/receiver
-source .venv/bin/activate
-pointspeak-receiver-smoke
-```
+Click the PointSpeak extension button, then:
 
-## Hermes handoff
+1. Select the relevant page element.
+2. Draw an annotation if helpful.
+3. Add a short typed note.
+4. Optionally record narration.
+5. Add another capture point or finalize the session.
 
-After annotation and optional narration are saved, the extension asks the receiver to submit the bundle to Hermes API Server:
+Finalized sessions are written under:
 
 ```text
-POST http://127.0.0.1:48321/sessions/<session_id>/handoff
+~/.pointspeak/sessions/<session-id>/session.pointspeak/
 ```
 
-The receiver sends a non-blocking run request to Hermes:
+## Bundle contents
+
+A finalized bundle is a normal folder on disk. Typical generated artifacts include:
 
 ```text
-POST http://127.0.0.1:8642/v1/runs
-```
-
-Configuration:
-
-- `POINTSPEAK_HERMES_API_URL` — defaults to `http://127.0.0.1:8642`
-- `POINTSPEAK_HERMES_MODEL` — defaults to `hermes-agent`
-- `POINTSPEAK_HERMES_API_KEY` or `API_SERVER_KEY` — optional bearer token if Hermes API Server requires auth
-- `POINTSPEAK_HERMES_TIMEOUT_SECONDS` — defaults to `3`
-
-Every attempt writes:
-
-```text
-handoff/hermes-request.json
-```
-
-
-## Milestones 6-10
-
-The receiver now derives agent-ready artifacts from each bundle:
-
-- **Milestone 6 — Hermes Intake:** `POST /sessions/<id>/intake` writes `handoff/intake.json` and `handoff/action-draft.md`, including observed intent, capture points, redaction notes, artifact paths, and suggested next actions.
-- **Milestone 7 — Browser Replay:** `GET /sessions/<id>/replay` writes `replay/index.html`, a local screenshot viewer with element, annotation, and redaction overlays.
-- **Milestone 8 — RoscoeDesktop Export:** `POST /sessions/<id>/desktop-export` writes a desktop inbox payload to `POINTSPEAK_DESKTOP_INBOX` or `~/Github/RoscoeDesktop/.pointspeak-inbox`.
-- **Milestone 9 — Privacy Controls:** `POST /sessions/<id>/privacy` stores text redaction controls and screenshot mask regions in `privacy-report.json`; intake/replay generation applies those controls to shared text and overlays.
-- **Milestone 10 — Multi-capture Sessions:** sessions can contain multiple element/annotation/narration groups, exposed as `capturePoints` in `handoff/latest.json`, `handoff/intake.json`, and `GET /sessions/<id>/capture-points`.
-
-Finalized bundles include:
-
-```text
+captures.ndjson
+annotations.ndjson
+elements.ndjson
+narrations.ndjson
+privacy-report.json
 handoff/latest.md
 handoff/latest.json
 handoff/intake.json
 handoff/action-draft.md
 replay/index.html
 desktop/latest.json
-privacy-report.json
 ```
 
+Useful files:
 
-## Milestone 11 — Bridge Router
+- `handoff/latest.md` — a human- and agent-readable summary of the capture.
+- `handoff/intake.json` — structured capture points, suggested actions, redaction status, and artifact paths.
+- `replay/index.html` — a local replay viewer with screenshot and annotation overlays.
+- `privacy-report.json` — redaction controls and privacy metadata.
 
-PointSpeak now treats local durable capture as success and agent delivery as an optional bridge. If no agent has activated the bridge, captures are queued locally instead of surfacing a scary delivery error.
+## Local speech-to-text
 
-Bridge endpoints:
+Voice narration is optional. Capture works even when speech-to-text is not installed.
+
+For local transcription, install `faster-whisper` in the receiver environment:
+
+```bash
+cd apps/receiver
+source .venv/bin/activate
+pip install faster-whisper
+export POINTSPEAK_STT_ENABLED=true
+export POINTSPEAK_STT_MODEL=base   # optional; defaults to base
+pointspeak-receiver
+```
+
+## Agent bridge
+
+PointSpeak separates local capture from agent delivery:
+
+- Local capture is durable and should succeed even when no agent is available.
+- Agent delivery is optional and lease-based.
+- If delivery fails, the bundle remains available locally and can be retried or inspected manually.
+
+The receiver exposes bridge endpoints:
 
 ```text
-POST /bridge/activate        # agent lease, e.g. coder for 30 minutes
-POST /bridge/release         # lower the active agent side of the bridge
-GET  /bridge/status          # active lease + recent events
-GET  /bridge/inbox           # queued events by target/status
-POST /bridge/claim           # append-only claim log for an agent
-POST /bridge/queue           # queue an existing session
+POST /bridge/activate
+POST /bridge/release
+GET  /bridge/status
+GET  /bridge/inbox
+POST /bridge/claim
+POST /bridge/queue
 POST /sessions/<id>/bridge-finalize
 ```
 
-Router files live under:
-
-```text
-~/.pointspeak/bridge/
-  state.json
-  events.ndjson
-  inbox/unclaimed.ndjson
-  inbox/<agent>.ndjson
-```
-
-A bridge activation can target a specific Hermes profile API server:
-
-```json
-{
-  "agent": "coder",
-  "ttlMinutes": 30,
-  "hermesApiUrl": "http://127.0.0.1:8642",
-  "apiKeyEnv": "POINTSPEAK_CODER_API_KEY",
-  "includeBacklogMinutes": 30
-}
-```
-
-If delivery fails or no lease is active, the extension displays `QUEUE`; the side panel shows the bridge event and any delivery warning.
-
-## Milestone 12 — Wake Bridge + Local STT
-
-When a lease is active, `bridge-finalize` now turns the capture into an active Coder handoff rather than a passive queued artifact. Bridge activations support:
+Example bridge activation:
 
 ```json
 {
@@ -151,17 +154,66 @@ When a lease is active, `bridge-finalize` now turns the capture into an active C
   "hermesApiUrl": "http://127.0.0.1:8642",
   "apiKeyEnv": "POINTSPEAK_HERMES_API_KEY",
   "notifyTarget": "telegram",
-  "wakeChat": true
+  "wakeChat": true,
+  "bridgeMode": "api_run"
 }
 ```
 
-With `wakeChat: true`, the Hermes run instructions tell Coder to send a concise response to `notifyTarget` (for example the Telegram home chat) so the capture wakes the user-facing chat instead of requiring a manual follow-up message.
+Supported bridge modes:
 
-Narration transcription is best-effort and local-first. If `faster-whisper` is installed, missing narration transcripts are generated during intake/finalize and written back to `narrations.ndjson`; if it is unavailable or fails, capture still succeeds and the narration metadata records the STT status.
+- `api_run` — submits the handoff to a Hermes-compatible `/v1/runs` API.
+- `native_telegram` — when used with a compatible Hermes Gateway, injects the handoff into the live Telegram gateway session so the agent processes it like a normal chat message.
 
-Optional local STT setup:
+Configuration variables:
+
+```text
+POINTSPEAK_HERMES_API_URL          Default Hermes-compatible API URL
+POINTSPEAK_HERMES_API_KEY          Bearer token for the agent API, if required
+POINTSPEAK_HERMES_MODEL            Optional model name for API-run handoff
+POINTSPEAK_HERMES_TIMEOUT_SECONDS  Request timeout for handoff submission
+POINTSPEAK_STT_ENABLED             Enable best-effort local narration transcription
+POINTSPEAK_STT_MODEL               faster-whisper model name; defaults to base
+POINTSPEAK_ROOT                    Override the default ~/.pointspeak storage root
+```
+
+## Receiver smoke test
+
+Run the receiver smoke test without Chrome:
 
 ```bash
-pip install faster-whisper
-export POINTSPEAK_STT_MODEL=base   # optional; defaults to base
+cd apps/receiver
+source .venv/bin/activate
+pointspeak-receiver-smoke
 ```
+
+Or from the repository root:
+
+```bash
+PYTHONPATH=apps/receiver/src python -m pointspeak_receiver.smoke
+```
+
+## Development
+
+Common commands:
+
+```bash
+npm run typecheck
+npm run build
+```
+
+The extension build output and local receiver data are intentionally ignored by Git. Do not commit `.env` files, local `.pointspeak` bundles, virtual environments, `node_modules`, or generated `dist` folders.
+
+## Privacy model
+
+PointSpeak is designed to be local-first:
+
+- Captures are stored on your machine by default.
+- Redaction controls are stored with the bundle.
+- Generated handoffs should reference local artifact paths rather than uploading screenshots by default.
+- Agent delivery is explicit and configurable.
+
+You should still review bundles before sharing them outside your own trusted environment, especially when capturing pages that may contain secrets, client data, or personal information.
+
+## License
+
+No license has been selected yet. Until a license is added, all rights are reserved by the repository owner.
