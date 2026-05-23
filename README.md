@@ -149,13 +149,10 @@ Example bridge activation:
 
 ```json
 {
-  "agent": "coder",
+  "agent": "codex",
   "ttlMinutes": 120,
-  "hermesApiUrl": "http://127.0.0.1:8642",
-  "apiKeyEnv": "POINTSPEAK_HERMES_API_KEY",
-  "notifyTarget": "telegram",
-  "wakeChat": true,
-  "bridgeMode": "api_run"
+  "bridgeMode": "generic_cli",
+  "wakeChat": false
 }
 ```
 
@@ -163,6 +160,16 @@ Supported bridge modes:
 
 - `api_run` — submits the handoff to a Hermes-compatible `/v1/runs` API.
 - `native_telegram` — when used with a compatible Hermes Gateway, injects the handoff into the live Telegram gateway session so the agent processes it like a normal chat message.
+- `generic_cli` — prepares local prompt/adapter files that can be fed to CLI agents such as Claude Code, Codex, or any other agent that can read the bundle from disk.
+
+Generic adapter endpoints:
+
+```text
+GET /sessions/<id>/agent-adapter
+GET /sessions/<id>/agent-prompt.md
+```
+
+See `docs/agent-adapters.md` for Claude Code and Codex examples.
 
 Configuration variables:
 

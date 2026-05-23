@@ -173,12 +173,12 @@ class SubmitHandoffRequest(BaseModel):
     instructions: str | None = None
     sessionKey: str | None = None
     sessionId: str | None = None
-    bridgeMode: str = "api_run"
+    bridgeMode: Literal["api_run", "native_telegram", "generic_cli"] = "api_run"
 
 
 class SubmitHandoffResponse(BaseModel):
     sessionId: str
-    status: Literal["dry_run", "submitted", "failed"]
+    status: Literal["dry_run", "submitted", "failed", "prepared"]
     runId: str | None = None
     hermesApiUrl: str
     requestPath: str
@@ -404,7 +404,7 @@ class BridgeActivateRequest(BaseModel):
     includeBacklogMinutes: int = Field(default=0, ge=0, le=7 * 24 * 60)
     sessionKey: str | None = None
     sessionId: str | None = None
-    bridgeMode: str = "native_telegram"
+    bridgeMode: Literal["api_run", "native_telegram", "generic_cli"] = "native_telegram"
 
 
 class BridgeReleaseRequest(BaseModel):
@@ -1195,6 +1195,86 @@ Handoff content:
 """
 
 
+def render_generic_agent_prompt(session_id: str, root: Path, agent_name: str | None = None, instructions: str | None = None) -> str:
+    handoff_path = root / "handoff" / "latest.md"
+    intake_path = root / "handoff" / "intake.json"
+    action_path = root / "handoff" / "action-draft.md"
+    replay_path = root / "replay" / "index.html"
+    manifest_path = root / "manifest.json"
+    handoff_text = handoff_path.read_text(encoding="utf-8") if handoff_path.exists() else ""
+    target = agent_name or "agent"
+    extra = f"\n\nAdditional user/bridge instructions:\n{instructions}" if instructions else ""
+    return f"""# PointSpeak Visual Briefing for {target}
+
+You are receiving a local-first PointSpeak visual briefing. Use the files below as precise UI context from the user. Inspect the screenshot/replay and structured intake before making code changes.
+
+## Required context files
+
+- Bundle directory: `{root}`
+- Handoff markdown: `{handoff_path}`
+- Structured intake JSON: `{intake_path}`
+- Action draft: `{action_path}`
+- Replay HTML: `{replay_path}`
+- Manifest: `{manifest_path}`
+
+## Working instructions
+
+1. Treat this as user-provided context for the current task, not as background telemetry.
+2. First acknowledge what UI element or workflow the user pointed at.
+3. Read `handoff/latest.md` and `handoff/intake.json`; open `replay/index.html` or inspect the screenshot if visual detail matters.
+4. Respect `privacy-report.json`; do not expose redacted content.
+5. If you modify code, run the relevant project checks and summarize changed files.
+6. If the capture is ambiguous, ask a focused follow-up rather than guessing.
+{extra}
+
+## Embedded handoff preview
+
+{handoff_text}
+"""
+
+
+def write_generic_agent_adapter(
+    session_id: str,
+    root: Path,
+    agent_name: str | None = None,
+    instructions: str | None = None,
+) -> dict[str, Any]:
+    handoff_dir = root / "handoff"
+    adapters_dir = handoff_dir / "adapters"
+    adapters_dir.mkdir(parents=True, exist_ok=True)
+    normalized_agent = normalize_target(agent_name or "generic")
+    prompt_path = adapters_dir / f"{normalized_agent}.prompt.md"
+    adapter_path = adapters_dir / f"{normalized_agent}.adapter.json"
+    prompt = render_generic_agent_prompt(session_id, root, normalized_agent, instructions)
+    prompt_path.write_text(prompt, encoding="utf-8")
+    adapter = {
+        "schemaVersion": SCHEMA_VERSION,
+        "createdAt": utc_now(),
+        "adapter": "generic_cli",
+        "agent": normalized_agent,
+        "sessionId": session_id,
+        "bundlePath": str(root),
+        "promptPath": str(prompt_path),
+        "artifacts": {
+            "handoffMarkdown": str(root / "handoff" / "latest.md"),
+            "handoffJson": str(root / "handoff" / "latest.json"),
+            "intakeJson": str(root / "handoff" / "intake.json"),
+            "actionDraft": str(root / "handoff" / "action-draft.md"),
+            "replayHtml": str(root / "replay" / "index.html"),
+            "privacyReport": str(root / "privacy-report.json"),
+        },
+        "cliExamples": {
+            "claudeCode": f"claude < {prompt_path}",
+            "codex": f"codex exec < {prompt_path}",
+            "copyPrompt": f"cat {prompt_path}",
+        },
+    }
+    write_json(adapter_path, adapter)
+    write_json(handoff_dir / "generic-agent-adapter.json", adapter)
+    (handoff_dir / "generic-agent-prompt.md").write_text(prompt, encoding="utf-8")
+    return adapter
+
+
 def submit_handoff_to_hermes(
     session_id: str,
     root: Path,
@@ -1223,6 +1303,37 @@ def submit_handoff_to_hermes(
     api_key = os.environ.get("POINTSPEAK_HERMES_API_KEY") or os.environ.get("API_SERVER_KEY")
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
+
+    if req.bridgeMode == "generic_cli":
+        adapter = write_generic_agent_adapter(session_id, root, req.sessionKey or "generic", instructions)
+        write_json(
+            request_path,
+            {
+                "createdAt": utc_now(),
+                "status": "prepared",
+                "adapter": "generic_cli",
+                "adapterPath": str(root / "handoff" / "generic-agent-adapter.json"),
+                "promptPath": adapter.get("promptPath"),
+                "body": body,
+            },
+        )
+        append_ndjson(
+            root / "timeline.ndjson",
+            {
+                "eventId": f"t_{uuid.uuid4().hex}",
+                "timestampMs": 0,
+                "type": "handoff.prepared",
+                "data": {"target": "generic-cli", "adapterPath": str(root / "handoff" / "generic-agent-adapter.json")},
+            },
+        )
+        refresh_handoff_and_manifest(root, session_id)
+        return SubmitHandoffResponse(
+            sessionId=session_id,
+            status="prepared",
+            hermesApiUrl="local-generic-cli",
+            requestPath=str(request_path),
+            handoff=str(handoff_path),
+        )
 
     if req.dryRun:
         endpoint = "/v1/gateway/inject" if req.bridgeMode == "native_telegram" else "/v1/runs"
@@ -1591,6 +1702,24 @@ def submit_handoff(session_id: str, req: SubmitHandoffRequest | None = None) -> 
     return submit_handoff_to_hermes(session_id, root, req or SubmitHandoffRequest())
 
 
+@app.get("/sessions/{session_id}/agent-adapter")
+def get_agent_adapter(session_id: str, agent: str = "generic", instructions: str | None = None) -> dict[str, Any]:
+    root = require_session_root(session_id)
+    refresh_handoff_and_manifest(root, session_id)
+    write_intake_artifacts(session_id, root)
+    adapter = write_generic_agent_adapter(session_id, root, agent, instructions)
+    refresh_handoff_and_manifest(root, session_id)
+    return adapter
+
+
+@app.get("/sessions/{session_id}/agent-prompt.md", response_class=PlainTextResponse)
+def get_agent_prompt(session_id: str, agent: str = "generic", instructions: str | None = None) -> str:
+    root = require_session_root(session_id)
+    refresh_handoff_and_manifest(root, session_id)
+    write_intake_artifacts(session_id, root)
+    return render_generic_agent_prompt(session_id, root, normalize_target(agent), instructions)
+
+
 @app.post("/bridge/activate")
 def activate_bridge(req: BridgeActivateRequest) -> dict[str, object]:
     expires = datetime.now(timezone.utc).timestamp() + req.ttlMinutes * 60
@@ -1703,7 +1832,8 @@ def bridge_finalize(session_id: str) -> BridgeFinalizeResponse:
     lease = active_bridge_lease()
     handoff: SubmitHandoffResponse | None = None
     handoff_api_key: str | None = None
-    if lease and lease.get("hermesApiUrl"):
+    bridge_mode = str(lease.get("bridgeMode") or "api_run") if lease else "api_run"
+    if lease and (lease.get("hermesApiUrl") or bridge_mode == "generic_cli"):
         env_key = str(lease.get("apiKeyEnv") or "").strip()
         previous = os.environ.get("POINTSPEAK_HERMES_API_KEY")
         if env_key and os.environ.get(env_key):
@@ -1714,12 +1844,12 @@ def bridge_finalize(session_id: str) -> BridgeFinalizeResponse:
                 session_id,
                 root,
                 SubmitHandoffRequest(
-                    hermesApiUrl=str(lease.get("hermesApiUrl")),
+                    hermesApiUrl=str(lease.get("hermesApiUrl") or DEFAULT_HERMES_API_URL),
                     model=lease.get("model") or DEFAULT_HERMES_MODEL,
                     instructions=bridge_wake_instructions(lease) if lease.get("wakeChat", True) else None,
-                    sessionKey=lease.get("sessionKey"),
+                    sessionKey=lease.get("sessionKey") or (lease.get("agent") if bridge_mode == "generic_cli" else None),
                     sessionId=lease.get("sessionId"),
-                    bridgeMode=str(lease.get("bridgeMode") or "api_run"),
+                    bridgeMode=bridge_mode,
                 ),
             )
             start_bridge_completion_notification(session_id, lease, handoff, handoff_api_key)

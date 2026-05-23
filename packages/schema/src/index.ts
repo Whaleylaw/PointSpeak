@@ -127,7 +127,7 @@ export const BridgeLeaseSchema = z.object({
   notifyTarget: z.string().optional().nullable(),
   wakeChat: z.boolean().default(true),
   includeBacklogMinutes: z.number().int().nonnegative().default(0),
-  bridgeMode: z.enum(["api_run", "native_telegram"]).default("native_telegram"),
+  bridgeMode: z.enum(["api_run", "native_telegram", "generic_cli"]).default("native_telegram"),
 });
 
 export const BridgeEventSchema = z.object({
