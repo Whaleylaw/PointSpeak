@@ -162,14 +162,77 @@ Supported bridge modes:
 - `native_telegram` — when used with a compatible Hermes Gateway, injects the handoff into the live Telegram gateway session so the agent processes it like a normal chat message.
 - `generic_cli` — prepares local prompt/adapter files that can be fed to CLI agents such as Claude Code, Codex, or any other agent that can read the bundle from disk.
 
+## CLI agent adapter
+
+Use the generic CLI adapter when your agent is not a Hermes Gateway bot. It creates a ready-to-paste prompt plus machine-readable adapter metadata for tools such as Claude Code, Codex, Cursor agents, or any local agent that can read files from disk.
+
 Generic adapter endpoints:
 
 ```text
-GET /sessions/<id>/agent-adapter
-GET /sessions/<id>/agent-prompt.md
+GET /sessions/<id>/agent-adapter?agent=<agent-name>
+GET /sessions/<id>/agent-prompt.md?agent=<agent-name>
 ```
 
-See `docs/agent-adapters.md` for Claude Code and Codex examples.
+The adapter writes these files into the session bundle:
+
+```text
+handoff/generic-agent-prompt.md
+handoff/generic-agent-adapter.json
+handoff/adapters/<agent-name>.prompt.md
+handoff/adapters/<agent-name>.adapter.json
+```
+
+### Option A: generate a prompt for an existing capture
+
+```bash
+# Replace ps_... with a real PointSpeak session id.
+curl -sS \
+  'http://127.0.0.1:48321/sessions/ps_.../agent-prompt.md?agent=codex' \
+  -o /tmp/pointspeak-codex-prompt.md
+
+codex exec < /tmp/pointspeak-codex-prompt.md
+```
+
+For Claude Code:
+
+```bash
+curl -sS \
+  'http://127.0.0.1:48321/sessions/ps_.../agent-prompt.md?agent=claude-code' \
+  -o /tmp/pointspeak-claude-prompt.md
+
+claude < /tmp/pointspeak-claude-prompt.md
+```
+
+### Option B: activate a generic CLI bridge
+
+A generic CLI bridge prepares adapter files automatically whenever a capture is finalized. It does not call a remote API or upload screenshots.
+
+```bash
+curl -sS -X POST http://127.0.0.1:48321/bridge/activate \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "agent": "codex",
+    "ttlMinutes": 120,
+    "bridgeMode": "generic_cli",
+    "wakeChat": false
+  }'
+```
+
+After you finalize a capture, inspect the bridge event or session bundle to find the prompt path:
+
+```bash
+curl -sS http://127.0.0.1:48321/bridge/status
+```
+
+Then run the generated prompt with your CLI agent:
+
+```bash
+codex exec < ~/.pointspeak/sessions/<session-id>/session.pointspeak/handoff/adapters/codex.prompt.md
+# or
+claude < ~/.pointspeak/sessions/<session-id>/session.pointspeak/handoff/adapters/claude-code.prompt.md
+```
+
+See `docs/agent-adapters.md` for more details.
 
 Configuration variables:
 
